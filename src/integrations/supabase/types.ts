@@ -14,7 +14,116 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      ad_costs: {
+        Row: {
+          amount: number
+          created_at: string
+          date: string
+          id: string
+          platform: string
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          date: string
+          id?: string
+          platform: string
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          date?: string
+          id?: string
+          platform?: string
+        }
+        Relationships: []
+      }
+      orders: {
+        Row: {
+          amount: number | null
+          courier_fee: number | null
+          created_at: string
+          customer_address: string | null
+          customer_name: string | null
+          dispatch_date: string | null
+          id: string
+          order_id: string | null
+          order_status: string | null
+          product_id: string | null
+          product_name: string | null
+          return_received: boolean | null
+          tracking_number: string
+          updated_at: string
+        }
+        Insert: {
+          amount?: number | null
+          courier_fee?: number | null
+          created_at?: string
+          customer_address?: string | null
+          customer_name?: string | null
+          dispatch_date?: string | null
+          id?: string
+          order_id?: string | null
+          order_status?: string | null
+          product_id?: string | null
+          product_name?: string | null
+          return_received?: boolean | null
+          tracking_number: string
+          updated_at?: string
+        }
+        Update: {
+          amount?: number | null
+          courier_fee?: number | null
+          created_at?: string
+          customer_address?: string | null
+          customer_name?: string | null
+          dispatch_date?: string | null
+          id?: string
+          order_id?: string | null
+          order_status?: string | null
+          product_id?: string | null
+          product_name?: string | null
+          return_received?: boolean | null
+          tracking_number?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "orders_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      products: {
+        Row: {
+          cogs: number
+          created_at: string
+          current_stock: number
+          id: string
+          name: string
+          updated_at: string
+        }
+        Insert: {
+          cogs?: number
+          created_at?: string
+          current_stock?: number
+          id?: string
+          name: string
+          updated_at?: string
+        }
+        Update: {
+          cogs?: number
+          created_at?: string
+          current_stock?: number
+          id?: string
+          name?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
