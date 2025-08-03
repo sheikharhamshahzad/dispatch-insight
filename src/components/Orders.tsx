@@ -76,27 +76,36 @@ interface PostExResponse {
   }
 }
 
-// Add these new interfaces and helper functions before the Orders component
+// Update interface to track variants for each product
 interface ProductTotals {
-  [key: string]: number;
+  [key: string]: {
+    total: number;
+    variants: {
+      [variant: string]: number;
+    };
+  };
 }
 
-// Helper function to parse product descriptions and extract quantities
-const parseProductDescriptions = (description: string): { product: string, quantity: number }[] => {
-  const products: { product: string, quantity: number }[] = [];
+// Move the function outside of the Orders.tsx file and export it
+export const parseProductDescriptions = (description: string): { product: string, variant: string, quantity: number }[] => {
+  const products: { product: string, variant: string, quantity: number }[] = [];
   
-  // Match pattern like "1 x RGB 16 Color Sunset Lamp" or "2 x Astrolamps™ Wave Projector"
-  const regex = /(\d+)\s*x\s*([\w\s™™™\-\(\)]+?)(?:\s*-\s*|\s*\]|$)/g;
+  // This improved regex handles both parentheses variants and dash-separated variants
+  const regex = /(\d+)\s*x\s*([\w\s™™™\-]+?)(?:\s*\(([^)]+)\)|\s*-\s*([^-\[\]]+?)\s*-|\s*\]|$)/g;
   let match;
   
   while ((match = regex.exec(description)) !== null) {
     const quantity = parseInt(match[1], 10);
     let product = match[2].trim();
+    // Get variant from either parentheses format (match[3]) or dash format (match[4])
+    let variant = match[3] || match[4] || "Default";
     
     // Standardize product names (remove extra spaces and normalize)
     product = product.replace(/\s+/g, ' ').trim();
+    // Also trim the variant
+    variant = variant.trim();
     
-    products.push({ product, quantity });
+    products.push({ product, variant, quantity });
   }
   
   return products;
@@ -130,6 +139,14 @@ export function Orders() {
 
   // Add this new state for status filtering at the top of your component
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
+
+  // Add these new states at the top of your Orders component
+  const [cogsStats, setCogsStats] = useState({
+    totalCOGS: 0,
+    totalCourierFees: 0,
+    avgCourierFee: 0,
+    productCOGSBreakdown: {} as Record<string, number>
+  });
 
   useEffect(() => {
     fetchOrders();
@@ -260,6 +277,16 @@ export function Orders() {
         return_received: false // Default value for new orders
       };
 
+      // Check if order already exists (to avoid duplicate inventory updates)
+      const { data: existingOrder } = await supabase
+        .from('orders')
+        .select('tracking_number')
+        .eq('tracking_number', order.tracking_number)
+        .single();
+    
+      // If this is a new order, update inventory
+      const isNewOrder = !existingOrder;
+
       const { error } = await supabase.from('orders').upsert([order], {
         onConflict: 'tracking_number'
       });
@@ -267,6 +294,12 @@ export function Orders() {
       if (error) {
         console.error('Error saving order:', error);
         return false;
+      }
+      
+      // Only update inventory for new orders to avoid duplicate deductions
+      if (isNewOrder) {
+        // Deduct from inventory (-1 multiplier to reduce stock)
+        await processInventoryUpdates(order.product_name, -1);
       }
       
       return true;
@@ -388,11 +421,21 @@ export function Orders() {
     if (!orderToDelete) return;
     
     try {
+      // Before deleting, we need to add the items back to inventory if the order was dispatched
+      // but not already returned
+      if (orderToDelete.order_status !== 'returned' && !orderToDelete.return_received) {
+        // Add items back to inventory (with +1 multiplier to increase stock)
+        await processInventoryUpdates(orderToDelete.product_name, 1);
+        
+        // Optional: Log the inventory update
+        console.log(`Inventory updated for deleted order: ${orderToDelete.order_id}`);
+      }
+      
       const { error } = await supabase
         .from('orders')
         .delete()
         .eq('id', orderToDelete.id);
-      
+    
       if (error) {
         toast({
           title: "Error",
@@ -402,8 +445,12 @@ export function Orders() {
       } else {
         toast({
           title: "Success",
-          description: "Order deleted successfully",
+          description: "Order deleted successfully and inventory updated",
         });
+        
+        // Refresh inventory display if needed
+        await refreshInventoryDisplay();
+        
         // Refresh orders list
         fetchOrders();
       }
@@ -445,6 +492,16 @@ export function Orders() {
     try {
       const newStatus = !order.return_received;
       
+      // If marking as received, add to inventory
+      // If unmarking as received, remove from inventory
+      if (newStatus) {
+        // Add to inventory when return is received
+        await processInventoryUpdates(order.product_name, 1);
+      } else {
+        // Remove from inventory if return mark is reversed
+        await processInventoryUpdates(order.product_name, -1);
+      }
+      
       const { error } = await supabase
         .from('orders')
         .update({ return_received: newStatus })
@@ -459,7 +516,7 @@ export function Orders() {
       } else {
         toast({
           title: "Success",
-          description: `Return status updated to ${newStatus ? 'Received' : 'Not Received'}`,
+          description: `Return status updated to ${newStatus ? 'Received' : 'Not Received'} and inventory ${newStatus ? 'increased' : 'decreased'}`,
         });
         // Refresh orders list
         fetchOrders();
@@ -495,7 +552,7 @@ export function Orders() {
     calculateProductTotals();
   }, [orders]);
   
-  // Function to calculate product totals from current orders
+  // Updated function to calculate product totals from current orders
   const calculateProductTotals = () => {
     const totals: ProductTotals = {};
     
@@ -504,12 +561,21 @@ export function Orders() {
       
       const parsedProducts = parseProductDescriptions(order.product_name);
       
-      parsedProducts.forEach(({ product, quantity }) => {
-        if (totals[product]) {
-          totals[product] += quantity;
-        } else {
-          totals[product] = quantity;
+      parsedProducts.forEach(({ product, variant, quantity }) => {
+        if (!totals[product]) {
+          totals[product] = {
+            total: 0,
+            variants: {}
+          };
         }
+        
+        totals[product].total += quantity;
+        
+        // Track variant counts
+        if (!totals[product].variants[variant]) {
+          totals[product].variants[variant] = 0;
+        }
+        totals[product].variants[variant] += quantity;
       });
     });
     
@@ -574,6 +640,166 @@ export function Orders() {
     setStatusFilter(status);
   };
 
+  // Add this function to fetch product COGS data from inventory
+  const fetchProductsCOGS = async () => {
+    const { data: inventoryData, error } = await supabase
+      .from('products')
+      .select('*');
+      
+    if (error) {
+      console.error('Error fetching inventory data:', error);
+      return {};
+    }
+    
+    // Create a map of product names to their COGS values
+    const cogsMap: Record<string, number> = {};
+    (inventoryData || []).forEach((product) => {
+      cogsMap[product.name.toLowerCase()] = product.cogs;
+    });
+    
+    return cogsMap;
+  };
+
+  // Add this function to calculate COGS and courier statistics
+  const calculateCOGSAndCourierStats = async () => {
+    // Fetch product COGS data
+    const cogsMap = await fetchProductsCOGS();
+    
+    let totalCOGS = 0;
+    let productCOGSBreakdown: Record<string, number> = {};
+    
+    // Calculate COGS for each product
+    Object.entries(productTotals).forEach(([product, data]) => {
+      const productNameLower = product.toLowerCase();
+      // Try to find an exact match first
+      let productCOGS = cogsMap[productNameLower];
+      
+      // If no exact match, try to find a partial match
+      if (productCOGS === undefined) {
+        const matchingProduct = Object.keys(cogsMap).find(key => 
+          productNameLower.includes(key) || key.includes(productNameLower)
+        );
+        if (matchingProduct) {
+          productCOGS = cogsMap[matchingProduct];
+        }
+      }
+      
+      if (productCOGS !== undefined) {
+        const productTotalCOGS = productCOGS * data.total;
+        totalCOGS += productTotalCOGS;
+        productCOGSBreakdown[product] = productTotalCOGS;
+      }
+    });
+    
+    // Calculate courier statistics
+    const totalCourierFees = orders.reduce((sum, order) => sum + (order.courier_fee || 0), 0);
+    const avgCourierFee = orders.length > 0 ? totalCourierFees / orders.length : 0;
+    
+    // Update stats
+    setCogsStats({
+      totalCOGS,
+      totalCourierFees,
+      avgCourierFee,
+      productCOGSBreakdown
+    });
+  };
+
+  // Add this useEffect to calculate COGS stats when orders or product totals change
+  useEffect(() => {
+    if (Object.keys(productTotals).length > 0) {
+      calculateCOGSAndCourierStats();
+    }
+  }, [productTotals]);
+
+  // Add these new functions to your Orders.tsx file
+
+  // Function to update inventory based on product name and quantity
+  const updateInventory = async (productName: string, quantityChange: number) => {
+    try {
+      // Fetch inventory data to find matching product
+      const { data: inventoryData, error: fetchError } = await supabase
+        .from('products')
+        .select('*');
+        
+      if (fetchError) {
+        console.error('Error fetching inventory data:', fetchError);
+        return false;
+      }
+      
+      // Find the matching product in inventory
+      const productNameLower = productName.toLowerCase();
+      let matchingProduct = inventoryData?.find(product => 
+        product.name.toLowerCase() === productNameLower
+      );
+      
+      // If no exact match, try to find a partial match
+      if (!matchingProduct) {
+        matchingProduct = inventoryData?.find(product => 
+          productNameLower.includes(product.name.toLowerCase()) || 
+          product.name.toLowerCase().includes(productNameLower)
+        );
+      }
+      
+      if (matchingProduct) {
+        // Calculate new stock level and ensure it doesn't go below 0
+        const newStock = Math.max(0, matchingProduct.current_stock + quantityChange);
+        
+        // Update the inventory
+        const { error: updateError } = await supabase
+          .from('products')
+          .update({ current_stock: newStock })
+          .eq('id', matchingProduct.id);
+        
+        if (updateError) {
+          console.error('Error updating inventory:', updateError);
+          return false;
+        }
+        
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Error updating inventory:', error);
+      return false;
+    }
+  };
+
+  // Function to process inventory updates for multiple products
+  const processInventoryUpdates = async (
+    productDescription: string, 
+    quantityMultiplier: number // Use 1 for adding to inventory, -1 for removing
+  ) => {
+    if (!productDescription) return;
+    
+    const parsedProducts = parseProductDescriptions(productDescription);
+    const updateResults: {product: string, success: boolean}[] = [];
+    
+    for (const { product, quantity } of parsedProducts) {
+      const success = await updateInventory(
+        product, 
+        quantity * quantityMultiplier
+      );
+      updateResults.push({ product, success });
+    }
+    
+    return updateResults;
+  };
+
+  // Add this utility function to your Orders component
+  const refreshInventoryDisplay = async () => {
+    try {
+      // Create a custom event to trigger inventory refresh on the Inventory component
+      const event = new CustomEvent('inventory-updated');
+      window.dispatchEvent(event);
+      
+      return true;
+    } catch (error) {
+      console.error('Error triggering inventory refresh:', error);
+      return false;
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -598,7 +824,7 @@ export function Orders() {
                 className="absolute right-0 top-0 h-full"
                 onClick={() => setSearchQuery('')}
               >
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-x">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
                 </svg>
                 <span className="sr-only">Clear search</span>
@@ -700,7 +926,7 @@ export function Orders() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <rect width="18" height="18" x="3" y="3" rx="2" />
                 <path d="M3 9h18" />
                 <path d="M9 21V9" />
@@ -717,17 +943,29 @@ export function Orders() {
                 <p className="text-sm text-muted-foreground">No products found in current orders</p>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {Object.entries(productTotals).map(([product, count], index) => (
+                  {Object.entries(productTotals).map(([product, data], index) => (
                     <div 
                       key={index} 
-                      className="flex justify-between items-center p-3 border rounded-md bg-muted/30"
+                      className="flex justify-between items-center p-3 border rounded-md bg-muted/30 group relative"
                     >
                       <span className="text-sm font-medium truncate max-w-[70%]" title={product}>
                         {product}
                       </span>
                       <Badge variant="secondary" className="ml-2">
-                        {count} units
+                        {data.total} units
                       </Badge>
+
+                      {/* Tooltip for variant breakdown */}
+                      <div className="absolute left-0 bottom-full mb-2 bg-black text-white p-2 rounded-md text-xs hidden group-hover:block z-10 min-w-[150px] shadow-lg">
+                        <div className="font-semibold mb-1 pb-1 border-b border-gray-700">Variant Breakdown:</div>
+                        {Object.entries(data.variants).map(([variant, count], i) => (
+                          <div key={i} className="flex justify-between py-0.5">
+                            <span>{variant}:</span>
+                            <span className="font-medium ml-2">{count} × </span>
+                          </div>
+                        ))}
+                        <div className="absolute left-4 bottom-[-6px] w-3 h-3 bg-black transform rotate-45"></div>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -738,13 +976,82 @@ export function Orders() {
               <div className="flex justify-between items-center">
                 <span className="font-semibold">Total Products:</span>
                 <Badge variant="outline" className="text-sm">
-                  {Object.values(productTotals).reduce((a, b) => a + b, 0)} units
+                  {Object.values(productTotals).reduce((a, b) => a + b.total, 0)} units
                 </Badge>
               </div>
             </div>
           </CardContent>
         </Card>
       </div>
+
+      {/* COGS and Courier Summary Card - Add the new card here */}
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+            </svg>
+            Cost Summary
+          </CardTitle>
+          <CardDescription>
+            Cost of goods sold and courier charges for {useCustomDateRange ? (
+              date?.from ? (
+                date.to ? (
+                  <>period from {format(date.from, "MMMM d, yyyy")} to {format(date.to, "MMMM d, yyyy")}</>
+                ) : (
+                  <>{format(date.from, "MMMM d, yyyy")}</>
+                )
+              ) : (
+                "selected period"
+              )
+            ) : (
+              <>the month of {new Date(selectedMonth).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</>
+            )}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="p-4 border rounded-md">
+              <div className="text-sm font-medium text-muted-foreground mb-1">Total COGS</div>
+              <div className="text-2xl font-bold">PKR {cogsStats.totalCOGS.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground mt-1">
+                Based on {Object.keys(productTotals).length} unique products
+              </div>
+            </div>
+            
+            <div className="p-4 border rounded-md">
+              <div className="text-sm font-medium text-muted-foreground mb-1">Total Courier Fees</div>
+              <div className="text-2xl font-bold">PKR {cogsStats.totalCourierFees.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground mt-1">
+                For {orders.length} orders
+              </div>
+            </div>
+            
+            <div className="p-4 border rounded-md">
+              <div className="text-sm font-medium text-muted-foreground mb-1">Avg Courier Fee</div>
+              <div className="text-2xl font-bold">PKR {cogsStats.avgCourierFee.toFixed(2)}</div>
+              <div className="text-xs text-muted-foreground mt-1">
+                Per order
+              </div>
+            </div>
+          </div>
+          
+          {Object.keys(cogsStats.productCOGSBreakdown).length > 0 && (
+            <div className="mt-4 pt-4 border-t">
+              <h4 className="text-sm font-medium mb-2">COGS Breakdown by Product</h4>
+              <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 md:grid-cols-3">
+                {Object.entries(cogsStats.productCOGSBreakdown).map(([product, cogs]) => (
+                  <div key={product} className="flex justify-between p-2 border rounded text-sm">
+                    <span className="truncate max-w-[70%]" title={product}>{product}</span>
+                    <span className="font-medium">PKR {cogs.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Orders Table */}
       <Card>
@@ -785,7 +1092,7 @@ export function Orders() {
                       <Popover>
                         <PopoverTrigger asChild>
                           <Button variant="ghost" size="icon" className="h-6 w-6">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-filter">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
                             </svg>
                             <span className="sr-only">Filter by status</span>
@@ -914,7 +1221,7 @@ export function Orders() {
                             size="icon"
                             onClick={() => startEditing(order)}
                           >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-edit">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <path d="M11 3h10v10M3 21h18" />
                             </svg>
                             <span className="sr-only">Edit amount</span>
@@ -958,7 +1265,7 @@ export function Orders() {
           </div>
         </CardContent>
       </Card>
-      
+
       {/* Delete Confirmation Dialog */}
       <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
         <DialogContent>

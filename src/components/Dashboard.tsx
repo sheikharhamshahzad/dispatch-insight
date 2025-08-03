@@ -2,7 +2,8 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
-import { TrendingUp, TrendingDown, Package, RefreshCw, ShoppingCart, AlertCircle } from "lucide-react";
+import { TrendingUp, TrendingDown, Package, RefreshCw, ShoppingCart, AlertCircle, Truck, Package2 } from "lucide-react";
+import { parseProductDescriptions } from "@/components/Orders"; // Import the helper function
 
 interface DashboardStats {
   totalDispatched: number;
@@ -12,7 +13,9 @@ interface DashboardStats {
   totalCourierFees: number;
   totalAdSpend: number;
   totalCOGS: number;
+  totalPackagingCost: number;
   netProfit: number;
+  avgCourierFee: number;
 }
 
 interface InventoryItem {
@@ -32,7 +35,9 @@ export function Dashboard() {
     totalCourierFees: 0,
     totalAdSpend: 0,
     totalCOGS: 0,
+    totalPackagingCost: 0,
     netProfit: 0,
+    avgCourierFee: 0,
   });
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
 
@@ -58,29 +63,73 @@ export function Dashboard() {
       .gte('date', startDate)
       .lte('date', endDate);
 
+    // Fetch packaging costs data
+    const { data: packagingCosts } = await supabase
+      .from('packaging_costs')
+      .select('amount')
+      .gte('date', startDate)
+      .lte('date', endDate);
+
     // Fetch inventory data
     const { data: inventoryData } = await supabase
       .from('products')
       .select('*');
 
-    if (orders && adCosts && inventoryData) {
+    if (orders && adCosts && packagingCosts && inventoryData) {
+      // Create a map of product names to COGS values
+      const cogsMap: Record<string, number> = {};
+      inventoryData.forEach(product => {
+        cogsMap[product.name.toLowerCase()] = product.cogs;
+      });
+
+      // Process orders and calculate statistics
       const totalDispatched = orders.length;
       const totalReturned = orders.filter(order => order.order_status === 'returned').length;
       const returnsReceived = orders.filter(order => order.return_received).length;
       const totalRevenue = orders
         .filter(order => order.order_status === 'delivered')
         .reduce((sum, order) => sum + (order.amount || 0), 0);
+      
+      // Calculate courier fees (for all orders)
       const totalCourierFees = orders.reduce((sum, order) => sum + (order.courier_fee || 0), 0);
+      const avgCourierFee = orders.length > 0 ? totalCourierFees / orders.length : 0;
+      
       const totalAdSpend = adCosts.reduce((sum, cost) => sum + cost.amount, 0);
       
-      // Calculate COGS for delivered orders
-      const deliveredOrders = orders.filter(order => order.order_status === 'delivered');
-      const totalCOGS = deliveredOrders.reduce((sum, order) => {
-        const product = inventoryData.find(p => p.name === order.product_name);
-        return sum + (product?.cogs || 0);
-      }, 0);
+      // Calculate packaging costs
+      const totalPackagingCost = packagingCosts.reduce((sum, cost) => sum + cost.amount, 0);
+      
+      // Calculate COGS for all orders (not just delivered)
+      let totalCOGS = 0;
+      
+      orders.forEach(order => {
+        if (!order.product_name) return;
+        
+        const parsedProducts = parseProductDescriptions(order.product_name);
+        
+        parsedProducts.forEach(({ product, quantity }) => {
+          const productNameLower = product.toLowerCase();
+          // Try to find an exact match first
+          let productCOGS = cogsMap[productNameLower];
+          
+          // If no exact match, try to find a partial match
+          if (productCOGS === undefined) {
+            const matchingProduct = Object.keys(cogsMap).find(key => 
+              productNameLower.includes(key) || key.includes(productNameLower)
+            );
+            if (matchingProduct) {
+              productCOGS = cogsMap[matchingProduct];
+            }
+          }
+          
+          if (productCOGS !== undefined) {
+            totalCOGS += productCOGS * quantity;
+          }
+        });
+      });
 
-      const netProfit = totalRevenue - totalCourierFees - totalAdSpend - totalCOGS;
+      // Update net profit calculation to include packaging costs
+      const netProfit = totalRevenue - totalCourierFees - totalAdSpend - totalCOGS - totalPackagingCost;
 
       setStats({
         totalDispatched,
@@ -90,7 +139,9 @@ export function Dashboard() {
         totalCourierFees,
         totalAdSpend,
         totalCOGS,
+        totalPackagingCost,
         netProfit,
+        avgCourierFee,
       });
 
       setInventory(inventoryData);
@@ -122,7 +173,7 @@ export function Dashboard() {
       </div>
 
       {/* Financial Overview */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-6">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Total Revenue</CardTitle>
@@ -147,18 +198,44 @@ export function Dashboard() {
             <div className={`text-2xl font-bold ${stats.netProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
               PKR {stats.netProfit.toLocaleString()}
             </div>
-            <p className="text-xs text-muted-foreground">Revenue - Costs - COGS</p>
+            <p className="text-xs text-muted-foreground">Revenue - All Expenses</p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Expenses</CardTitle>
-            <TrendingDown className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Courier Fees</CardTitle>
+            <Truck className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">PKR {(stats.totalCourierFees + stats.totalAdSpend).toLocaleString()}</div>
-            <p className="text-xs text-muted-foreground">Courier + Ad spend</p>
+            <div className="text-2xl font-bold">PKR {stats.totalCourierFees.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground">Total delivery charges</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Ad Spend</CardTitle>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 text-muted-foreground">
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <path d="M3 7h18" />
+              <path d="m8 12 4 4 4-4" />
+            </svg>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">PKR {stats.totalAdSpend.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground">Marketing expenses</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Packaging</CardTitle>
+            <Package2 className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">PKR {stats.totalPackagingCost.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground">Packaging materials</p>
           </CardContent>
         </Card>
 
@@ -173,6 +250,34 @@ export function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* COGS Analysis */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">COGS Analysis</CardTitle>
+          <ShoppingCart className="h-4 w-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="flex justify-between items-center p-3 border rounded-md">
+              <span className="font-medium">Total COGS</span>
+              <span className="text-lg font-bold">PKR {stats.totalCOGS.toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between items-center p-3 border rounded-md">
+              <span className="font-medium">COGS per Order</span>
+              <span className="text-lg font-bold">
+                PKR {stats.totalDispatched > 0 ? (stats.totalCOGS / stats.totalDispatched).toFixed(2) : '0'}
+              </span>
+            </div>
+            <div className="flex justify-between items-center p-3 border rounded-md">
+              <span className="font-medium">COGS % of Revenue</span>
+              <span className="text-lg font-bold">
+                {stats.totalRevenue > 0 ? ((stats.totalCOGS / stats.totalRevenue) * 100).toFixed(1) : '0'}%
+              </span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Operations Overview */}
       <div className="grid gap-4 md:grid-cols-3">

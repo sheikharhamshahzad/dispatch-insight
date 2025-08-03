@@ -4,8 +4,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Dashboard } from "@/components/Dashboard";
 import { Orders } from "@/components/Orders";
 import { AdCosts } from "@/components/AdCosts";
+import { Packaging } from "@/components/Packaging"; // Import the new component
 import { Inventory } from "@/components/Inventory";
-import { BarChart3, Package, DollarSign, Box } from "lucide-react";
+import { BarChart3, Package, DollarSign, Box, Package2 } from "lucide-react";
 
 const Index = () => {
   return (
@@ -19,7 +20,7 @@ const Index = () => {
         </div>
 
         <Tabs defaultValue="dashboard" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className="grid w-full grid-cols-5"> {/* Updated to 5 columns */}
             <TabsTrigger value="dashboard" className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4" />
               Dashboard
@@ -31,6 +32,10 @@ const Index = () => {
             <TabsTrigger value="ad-costs" className="flex items-center gap-2">
               <DollarSign className="h-4 w-4" />
               Ad Costs
+            </TabsTrigger>
+            <TabsTrigger value="packaging" className="flex items-center gap-2"> {/* New tab */}
+              <Package2 className="h-4 w-4" />
+              Packaging
             </TabsTrigger>
             <TabsTrigger value="inventory" className="flex items-center gap-2">
               <Box className="h-4 w-4" />
@@ -49,6 +54,10 @@ const Index = () => {
           <TabsContent value="ad-costs">
             <AdCosts />
           </TabsContent>
+          
+          <TabsContent value="packaging"> {/* New tab content */}
+            <Packaging />
+          </TabsContent>
 
           <TabsContent value="inventory">
             <Inventory />
@@ -57,6 +66,6 @@ const Index = () => {
       </div>
     </div>
   );
-};
+}
 
 export default Index;
