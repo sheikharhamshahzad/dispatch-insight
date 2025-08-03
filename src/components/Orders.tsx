@@ -7,8 +7,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/components/ui/use-toast";
-import { Upload, Download, Trash2 } from "lucide-react";
+import { Upload, Download, Trash2, Calendar as CalendarIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { format } from "date-fns";
+import { cn } from "@/lib/utils";
+import { DateRange } from "react-day-picker";
 
 // Import PDF.js
 import * as pdfjs from 'pdfjs-dist';
@@ -22,13 +27,14 @@ interface Order {
   order_id: string;
   customer_name: string;
   customer_address: string;
-  customer_phone: string; // Add this new field
+  customer_phone: string;
   product_name: string;
   amount: number;
   order_status: string;
   dispatch_date: string;
   return_received: boolean;
   courier_fee: number;
+  customer_city: string;
 }
 
 interface PostExResponse {
@@ -70,6 +76,32 @@ interface PostExResponse {
   }
 }
 
+// Add these new interfaces and helper functions before the Orders component
+interface ProductTotals {
+  [key: string]: number;
+}
+
+// Helper function to parse product descriptions and extract quantities
+const parseProductDescriptions = (description: string): { product: string, quantity: number }[] => {
+  const products: { product: string, quantity: number }[] = [];
+  
+  // Match pattern like "1 x RGB 16 Color Sunset Lamp" or "2 x Astrolamps™ Wave Projector"
+  const regex = /(\d+)\s*x\s*([\w\s™™™\-\(\)]+?)(?:\s*-\s*|\s*\]|$)/g;
+  let match;
+  
+  while ((match = regex.exec(description)) !== null) {
+    const quantity = parseInt(match[1], 10);
+    let product = match[2].trim();
+    
+    // Standardize product names (remove extra spaces and normalize)
+    product = product.replace(/\s+/g, ' ').trim();
+    
+    products.push({ product, quantity });
+  }
+  
+  return products;
+};
+
 export function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
@@ -79,22 +111,67 @@ export function Orders() {
   const [deleteTrackingNumber, setDeleteTrackingNumber] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+  const [searchQuery, setSearchQuery] = useState(''); // Add this new state for search
   const { toast } = useToast();
+  
+  // Date picker state
+  const [date, setDate] = useState<DateRange | undefined>({
+    from: undefined,
+    to: undefined
+  });
+
+  // Use either date range or month selection for filtering
+  const [useCustomDateRange, setUseCustomDateRange] = useState(false);
+  const [productTotals, setProductTotals] = useState<ProductTotals>({});
+  
+  // Add these new states for editing at the top of your Orders component
+  const [editingOrder, setEditingOrder] = useState<string | null>(null);
+  const [editingAmount, setEditingAmount] = useState<string>('');
+
+  // Add this new state for status filtering at the top of your component
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
 
   useEffect(() => {
     fetchOrders();
-  }, [selectedMonth]);
+  }, [selectedMonth, date, useCustomDateRange, searchQuery, statusFilter]); // Add statusFilter to dependency array
 
   const fetchOrders = async () => {
-    const startDate = `${selectedMonth}-01`;
-    const endDate = `${selectedMonth}-31`;
+    let query = supabase.from('orders').select('*');
+    
+    // Apply date filtering
+    if (useCustomDateRange && date) {
+      // If we have a custom date range
+      if (date.from) {
+        const formattedFrom = format(date.from, 'yyyy-MM-dd');
+        query = query.gte('dispatch_date', formattedFrom);
+        
+        if (date.to) {
+          // If we have both from and to dates
+          const formattedTo = format(date.to, 'yyyy-MM-dd');
+          query = query.lte('dispatch_date', formattedTo);
+        } else {
+          // If we only have a from date, only show that specific date
+          query = query.lte('dispatch_date', formattedFrom);
+        }
+      }
+    } else {
+      // Use month-based filtering
+      const startDate = `${selectedMonth}-01`;
+      const endDate = `${selectedMonth}-31`;
+      query = query.gte('dispatch_date', startDate).lte('dispatch_date', endDate);
+    }
+    
+    // Apply search query if it exists
+    if (searchQuery.trim()) {
+      query = query.ilike('order_id', `%${searchQuery.trim()}%`);
+    }
 
-    const { data, error } = await supabase
-      .from('orders')
-      .select('*')
-      .gte('dispatch_date', startDate)
-      .lte('dispatch_date', endDate)
-      .order('dispatch_date', { ascending: false });
+    // Apply status filter if selected
+    if (statusFilter) {
+      query = query.eq('order_status', statusFilter);
+    }
+
+    const { data, error } = await query.order('dispatch_date', { ascending: false });
 
     if (error) {
       toast({
@@ -103,7 +180,26 @@ export function Orders() {
         variant: "destructive",
       });
     } else {
-      setOrders(data || []);
+      // Map the data to ensure it matches the Order interface
+      const mappedOrders = (data || []).map(item => {
+        return {
+          id: item.id,
+          tracking_number: item.tracking_number,
+          order_id: item.order_id,
+          customer_name: item.customer_name,
+          customer_address: item.customer_address,
+          customer_phone: item.customer_phone || '',  // Default empty string if missing
+          product_name: item.product_name,
+          amount: item.amount,
+          order_status: item.order_status,
+          dispatch_date: item.dispatch_date,
+          return_received: item.return_received,
+          courier_fee: item.courier_fee,
+          customer_city: item.customer_city || ''  // Default empty string if missing
+        };
+      });
+      
+      setOrders(mappedOrders);
     }
   };
 
@@ -154,7 +250,7 @@ export function Orders() {
         order_id: dist.orderRefNumber,
         customer_name: dist.customerName,
         customer_address: dist.deliveryAddress,
-        customer_phone: dist.customerPhone, // Add customer phone
+        customer_phone: dist.customerPhone,
         customer_city: dist.cityName,
         product_name: dist.orderDetail,
         amount: dist.invoicePayment,
@@ -275,7 +371,6 @@ export function Orders() {
       
       // Refresh orders list
       fetchOrders();
-      
     } catch (error) {
       console.error('PDF processing error:', error);
       toast({
@@ -345,7 +440,7 @@ export function Orders() {
     );
   };
 
-  // Add this function before the return statement
+  // Toggle return status
   const toggleReturnStatus = async (order: Order) => {
     try {
       const newStatus = !order.return_received;
@@ -378,6 +473,107 @@ export function Orders() {
     }
   };
 
+  // Handle date selection
+  const handleDateSelect = (range: DateRange | undefined) => {
+    setDate(range);
+    setUseCustomDateRange(true);
+    
+    // If a single date was selected, or the range selection is complete
+    if ((range?.from && !range?.to) || (range?.from && range?.to)) {
+      fetchOrders();
+    }
+  };
+
+  // Clear date selection
+  const clearDateSelection = () => {
+    setDate({ from: undefined, to: undefined });
+    setUseCustomDateRange(false);
+  };
+
+  // Add this useEffect to calculate product totals when orders change
+  useEffect(() => {
+    calculateProductTotals();
+  }, [orders]);
+  
+  // Function to calculate product totals from current orders
+  const calculateProductTotals = () => {
+    const totals: ProductTotals = {};
+    
+    orders.forEach(order => {
+      if (!order.product_name) return;
+      
+      const parsedProducts = parseProductDescriptions(order.product_name);
+      
+      parsedProducts.forEach(({ product, quantity }) => {
+        if (totals[product]) {
+          totals[product] += quantity;
+        } else {
+          totals[product] = quantity;
+        }
+      });
+    });
+    
+    setProductTotals(totals);
+  };
+
+  // Add this function to handle the amount update
+  const handleAmountUpdate = async (orderId: string) => {
+    try {
+      // Validate the input is a number
+      const newAmount = parseFloat(editingAmount);
+      if (isNaN(newAmount)) {
+        toast({
+          title: "Error",
+          description: "Please enter a valid amount",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Update the order in Supabase
+      const { error } = await supabase
+        .from('orders')
+        .update({ amount: newAmount })
+        .eq('id', orderId);
+
+      if (error) {
+        toast({
+          title: "Error",
+          description: "Failed to update order amount: " + error.message,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Success",
+          description: "Order amount updated successfully",
+        });
+        // Refresh orders list
+        fetchOrders();
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "An unexpected error occurred",
+        variant: "destructive",
+      });
+    } finally {
+      // Reset editing state
+      setEditingOrder(null);
+      setEditingAmount('');
+    }
+  };
+
+  // Add this handler for when editing begins
+  const startEditing = (order: Order) => {
+    setEditingOrder(order.id);
+    setEditingAmount(order.amount.toString());
+  };
+
+  // Add this function to handle status filter changes
+  const handleStatusFilterChange = (status: string | null) => {
+    setStatusFilter(status);
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -385,27 +581,95 @@ export function Orders() {
           <h2 className="text-2xl font-bold">Orders Management</h2>
           <p className="text-muted-foreground">Track and manage parcel operations</p>
         </div>
-        <Select value={selectedMonth} onValueChange={setSelectedMonth}>
-          <SelectTrigger className="w-48">
-            <SelectValue placeholder="Select month" />
-          </SelectTrigger>
-          <SelectContent>
-            {Array.from({ length: 12 }, (_, i) => {
-              const date = new Date();
-              date.setMonth(date.getMonth() - i);
-              const value = date.toISOString().slice(0, 7);
-              const label = date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
-              return (
-                <SelectItem key={value} value={value}>
-                  {label}
-                </SelectItem>
-              );
-            })}
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-4">
+          {/* Search bar for Order ID */}
+          <div className="relative">
+            <Input
+              type="text"
+              placeholder="Search by Order ID"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-[200px]"
+            />
+            {searchQuery && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="absolute right-0 top-0 h-full"
+                onClick={() => setSearchQuery('')}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-x">
+                  <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+                </svg>
+                <span className="sr-only">Clear search</span>
+              </Button>
+            )}
+          </div>
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant={"outline"}
+                className={cn(
+                  "w-[280px] justify-start text-left font-normal",
+                  !date && "text-muted-foreground"
+                )}
+              >
+                <CalendarIcon className="mr-2 h-4 w-4" />
+                {date?.from ? (
+                  date.to ? (
+                    <>
+                      {format(date.from, "LLL dd, y")} - {format(date.to, "LLL dd, y")}
+                    </>
+                  ) : (
+                    format(date.from, "LLL dd, y")
+                  )
+                ) : (
+                  "Select date or range"
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="start">
+              <Calendar
+                initialFocus
+                mode="range"
+                defaultMonth={date?.from}
+                selected={date}
+                onSelect={handleDateSelect}
+                numberOfMonths={2}
+              />
+              <div className="p-3 border-t border-border">
+                <Button variant="outline" size="sm" onClick={clearDateSelection} className="w-full">
+                  Reset to Month View
+                </Button>
+              </div>
+            </PopoverContent>
+          </Popover>
+          
+          {!useCustomDateRange && (
+            <Select value={selectedMonth} onValueChange={setSelectedMonth}>
+              <SelectTrigger className="w-48">
+                <SelectValue placeholder="Select month" />
+              </SelectTrigger>
+              <SelectContent>
+                {Array.from({ length: 12 }, (_, i) => {
+                  const date = new Date();
+                  date.setMonth(date.getMonth() - i);
+                  const value = date.toISOString().slice(0, 7);
+                  const label = date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+                  return (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  );
+                })}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
       </div>
 
-      {/* PDF Upload Section */}
+      {/* PDF Upload Section with Product Totals */}
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
@@ -436,27 +700,48 @@ export function Orders() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Download className="h-5 w-5" />
-              Upload Return PDF
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                <rect width="18" height="18" x="3" y="3" rx="2" />
+                <path d="M3 9h18" />
+                <path d="M9 21V9" />
+              </svg>
+              Product Totals
             </CardTitle>
             <CardDescription>
-              Upload PDF with return labels to mark returns as received
+              Summary of products dispatched in the current view
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <Input
-              type="file"
-              accept=".pdf"
-              onChange={(e) => setPdfFile(e.target.files?.[0] || null)}
-            />
-            <Button 
-              onClick={() => handlePdfUpload('return')} 
-              disabled={!pdfFile || isProcessing}
-              className="w-full"
-              variant="outline"
-            >
-              {isProcessing ? "Processing..." : "Process Return PDF"}
-            </Button>
+          <CardContent>
+            <div className="grid gap-2">
+              {Object.keys(productTotals).length === 0 ? (
+                <p className="text-sm text-muted-foreground">No products found in current orders</p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {Object.entries(productTotals).map(([product, count], index) => (
+                    <div 
+                      key={index} 
+                      className="flex justify-between items-center p-3 border rounded-md bg-muted/30"
+                    >
+                      <span className="text-sm font-medium truncate max-w-[70%]" title={product}>
+                        {product}
+                      </span>
+                      <Badge variant="secondary" className="ml-2">
+                        {count} units
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            
+            <div className="mt-4 pt-4 border-t">
+              <div className="flex justify-between items-center">
+                <span className="font-semibold">Total Products:</span>
+                <Badge variant="outline" className="text-sm">
+                  {Object.values(productTotals).reduce((a, b) => a + b, 0)} units
+                </Badge>
+              </div>
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -464,7 +749,21 @@ export function Orders() {
       {/* Orders Table */}
       <Card>
         <CardHeader>
-          <CardTitle>Orders for {new Date(selectedMonth).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}</CardTitle>
+          <CardTitle>
+            {useCustomDateRange ? (
+              date?.from ? (
+                date.to ? (
+                  <>Orders from {format(date.from, "MMMM d, yyyy")} to {format(date.to, "MMMM d, yyyy")}</>
+                ) : (
+                  <>Orders for {format(date.from, "MMMM d, yyyy")}</>
+                )
+              ) : (
+                "Orders"
+              )
+            ) : (
+              <>Orders for {new Date(selectedMonth).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}</>
+            )}
+          </CardTitle>
           <CardDescription>
             {orders.length} orders found
           </CardDescription>
@@ -480,7 +779,87 @@ export function Orders() {
                   <TableHead>Customer Phone</TableHead>
                   <TableHead>Product</TableHead>
                   <TableHead>Amount</TableHead>
-                  <TableHead>Status</TableHead>
+                  <TableHead>
+                    <div className="flex items-center space-x-2">
+                      <span>Status</span>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button variant="ghost" size="icon" className="h-6 w-6">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-filter">
+                              <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+                            </svg>
+                            <span className="sr-only">Filter by status</span>
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-[200px] p-0" align="start">
+                          <div className="p-2 space-y-1">
+                            <div className="font-medium text-sm px-2 py-1">Filter by status</div>
+                            <div className="border-t my-1"></div>
+                            <Button 
+                              variant={statusFilter === null ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange(null)}
+                            >
+                              All Statuses
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "delivered" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("delivered")}
+                            >
+                              <span className="bg-green-100 text-green-800 text-xs font-medium px-2 py-0.5 rounded mr-2">Delivered</span>
+                              Delivered
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "returned" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("returned")}
+                            >
+                              <span className="bg-yellow-100 text-yellow-800 text-xs font-medium px-2 py-0.5 rounded mr-2">Returned</span>
+                              Returned
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "dispatched" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("dispatched")}
+                            >
+                              <span className="bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded mr-2">Dispatched</span>
+                              Dispatched
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "failed" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("failed")}
+                            >
+                              <span className="bg-red-100 text-red-800 text-xs font-medium px-2 py-0.5 rounded mr-2">Failed</span>
+                              Failed
+                            </Button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      {statusFilter && (
+                        <Badge variant="outline" className="ml-2 bg-muted">
+                          {statusFilter}
+                          <Button 
+                            variant="ghost" 
+                            size="icon" 
+                            className="h-4 w-4 ml-1 -mr-1" 
+                            onClick={() => handleStatusFilterChange(null)}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+                            </svg>
+                            <span className="sr-only">Clear filter</span>
+                          </Button>
+                        </Badge>
+                      )}
+                    </div>
+                  </TableHead>
                   <TableHead>Dispatch Date</TableHead>
                   <TableHead>Return Received</TableHead>
                   <TableHead>Courier Fee</TableHead>
@@ -511,7 +890,38 @@ export function Orders() {
                     </TableCell>
                     <TableCell>{order.customer_phone}</TableCell>
                     <TableCell>{order.product_name}</TableCell>
-                    <TableCell>PKR {order.amount}</TableCell>
+                    <TableCell>
+                      {editingOrder === order.id ? (
+                        <div className="flex gap-2">
+                          <Input
+                            type="number"
+                            value={editingAmount}
+                            onChange={(e) => setEditingAmount(e.target.value)}
+                            className="w-[100px]"
+                          />
+                          <Button
+                            onClick={() => handleAmountUpdate(order.id)}
+                            className="px-3"
+                          >
+                            Save
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span>PKR {order.amount}</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => startEditing(order)}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-edit">
+                              <path d="M11 3h10v10M3 21h18" />
+                            </svg>
+                            <span className="sr-only">Edit amount</span>
+                          </Button>
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell>{getStatusBadge(order.order_status)}</TableCell>
                     <TableCell>{new Date(order.dispatch_date).toLocaleDateString()}</TableCell>
                     <TableCell>
@@ -526,70 +936,41 @@ export function Orders() {
                     </TableCell>
                     <TableCell>PKR {order.courier_fee}</TableCell>
                     <TableCell>
-                      <Button 
-                        variant="destructive" 
-                        size="icon" 
+                      <Button
+                        variant="ghost"
+                        size="icon"
                         onClick={() => openDeleteConfirm(order)}
                       >
-                        <Trash2 className="h-4 w-4" />
+                        <Trash2 className="h-4 w-4 text-red-500" />
                       </Button>
                     </TableCell>
                   </TableRow>
                 ))}
+                {orders.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={11} className="text-center py-4">
+                      No orders found for the selected period
+                    </TableCell>
+                  </TableRow>
+                )}
               </TableBody>
             </Table>
           </div>
-          
-          {orders.length === 0 && (
-            <div className="text-center py-8 text-muted-foreground">
-              No orders found for this month
-            </div>
-          )}
         </CardContent>
       </Card>
-
+      
       {/* Delete Confirmation Dialog */}
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Confirm Deletion</DialogTitle>
+            <DialogTitle>Delete Order</DialogTitle>
             <DialogDescription>
               Are you sure you want to delete this order? This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button 
-              variant="outline" 
-              onClick={() => setIsDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button 
-              onClick={() => deleteTrackingNumber && handleDeleteOrder(deleteTrackingNumber)} 
-              className="bg-red-600 hover:bg-red-700"
-            >
-              Delete Order
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Delete Confirmation Dialog for new handler */}
-      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Confirm Deletion</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete this order? This action cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="flex space-x-2 justify-end">
-            <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>
-              Cancel
-            </Button>
-            <Button variant="destructive" onClick={handleDeleteOrder}>
-              Delete
-            </Button>
+            <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDeleteOrder}>Delete</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
