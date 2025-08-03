@@ -14,6 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { DateRange } from "react-day-picker";
+import { checkAndUpdateOrderStatuses } from "@/services/orderStatusChecker";
 
 // Import PDF.js
 import * as pdfjs from 'pdfjs-dist';
@@ -147,6 +148,9 @@ export function Orders() {
     avgCourierFee: 0,
     productCOGSBreakdown: {} as Record<string, number>
   });
+
+  // Add this state to your Orders component
+  const [isCheckingStatuses, setIsCheckingStatuses] = useState(false);
 
   useEffect(() => {
     fetchOrders();
@@ -800,6 +804,28 @@ export function Orders() {
     }
   };
 
+  // Add this function to your Orders component
+  const handleCheckOrderStatuses = async () => {
+    setIsCheckingStatuses(true);
+    try {
+      await checkAndUpdateOrderStatuses();
+      toast({
+        title: "Success",
+        description: "Order statuses and fees checked and updated",
+      });
+      // Refresh orders list to show the updates
+      fetchOrders();
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to check order statuses",
+        variant: "destructive",
+      });
+    } finally {
+      setIsCheckingStatuses(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -808,6 +834,45 @@ export function Orders() {
           <p className="text-muted-foreground">Track and manage parcel operations</p>
         </div>
         <div className="flex items-center gap-4">
+          {/* Add the Check Status button here */}
+          <Button
+            onClick={handleCheckOrderStatuses}
+            disabled={isCheckingStatuses}
+            variant="outline"
+            className="mr-2"
+          >
+            {isCheckingStatuses ? (
+              <>
+                <svg className="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Checking Orders...
+              </>
+            ) : (
+              <>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="mr-2"
+                >
+                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                  <path d="M3 3v5h5" />
+                  <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                  <path d="M16 21h5v-5" />
+                </svg>
+                Check Order Statuses
+              </>
+            )}
+          </Button>
+          
           {/* Search bar for Order ID */}
           <div className="relative">
             <Input
