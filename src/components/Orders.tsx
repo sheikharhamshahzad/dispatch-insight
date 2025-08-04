@@ -276,7 +276,7 @@ export function Orders() {
         product_name: dist.orderDetail,
         amount: dist.invoicePayment,
         order_status: dist.transactionStatus.toLowerCase(),
-        dispatch_date: dist.orderPickupDate,
+        dispatch_date: dist.transactionDate,
         courier_fee: dist.transactionFee + dist.transactionTax,
         return_received: false // Default value for new orders
       };
@@ -672,33 +672,48 @@ export function Orders() {
     let totalCOGS = 0;
     let productCOGSBreakdown: Record<string, number> = {};
     
-    // Only include orders that are NOT marked as return_received
-    const activeOrders = orders.filter(order => order.return_received !== true);
+    // First, calculate all dispatched products
+    const dispatchedProducts: Record<string, number> = {};
     
-    console.log(`Total orders: ${orders.length}, Active orders (not returned): ${activeOrders.length}`);
+    // Then, calculate all returned and received products
+    const returnedReceivedProducts: Record<string, number> = {};
     
-    // Create a new product totals object just for COGS calculation
-    const cogsProductTotals: Record<string, number> = {};
-    
-    // Process active orders only
-    activeOrders.forEach(order => {
+    // Process all orders first
+    orders.forEach(order => {
       if (!order.product_name) return;
       
       const parsedProducts = parseProductDescriptions(order.product_name);
       
-      parsedProducts.forEach(({ product, quantity }) => {
-        // Track products only from active orders
-        if (!cogsProductTotals[product]) {
-          cogsProductTotals[product] = 0;
+      parsedProducts.forEach(({ product, variant, quantity }) => {
+        // Track all dispatched products
+        if (!dispatchedProducts[product]) {
+          dispatchedProducts[product] = 0;
         }
-        cogsProductTotals[product] += quantity;
+        dispatchedProducts[product] += quantity;
+        
+        // Separately track returned and received products
+        if (order.order_status === 'returned' && order.return_received) {
+          if (!returnedReceivedProducts[product]) {
+            returnedReceivedProducts[product] = 0;
+          }
+          returnedReceivedProducts[product] += quantity;
+        }
       });
     });
     
-    // Calculate COGS based on active products only
-    Object.entries(cogsProductTotals).forEach(([product, quantity]) => {
-      if (quantity <= 0) return; // Skip if quantity is 0 or negative
+    // Calculate net quantities (dispatched minus returned)
+    const netProducts: Record<string, number> = {};
     
+    Object.keys(dispatchedProducts).forEach(product => {
+      const dispatched = dispatchedProducts[product] || 0;
+      const returned = returnedReceivedProducts[product] || 0;
+      netProducts[product] = Math.max(0, dispatched - returned);
+    });
+    
+    // Calculate COGS for each product based on net quantities
+    Object.entries(netProducts).forEach(([product, netQuantity]) => {
+      if (netQuantity <= 0) return; // Skip if all units are returned
+      
       const productNameLower = product.toLowerCase();
       // Try to find an exact match first
       let productCOGS = cogsMap[productNameLower];
@@ -714,12 +729,12 @@ export function Orders() {
       }
       
       if (productCOGS !== undefined) {
-        const productTotalCOGS = productCOGS * quantity;
+        const productTotalCOGS = productCOGS * netQuantity;
         totalCOGS += productTotalCOGS;
         productCOGSBreakdown[product] = productTotalCOGS;
         
         // Log for debugging
-        console.log(`Product: ${product}, Active Quantity: ${quantity}, COGS: ${productTotalCOGS}`);
+        console.log(`Product: ${product}, Total: ${dispatchedProducts[product]}, Returned: ${returnedReceivedProducts[product] || 0}, Net: ${netQuantity}, COGS: ${productTotalCOGS}`);
       }
     });
     
