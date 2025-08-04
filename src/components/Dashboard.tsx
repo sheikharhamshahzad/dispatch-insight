@@ -99,10 +99,11 @@ export function Dashboard() {
       // Calculate packaging costs
       const totalPackagingCost = packagingCosts.reduce((sum, cost) => sum + cost.amount, 0);
       
-      // Calculate COGS for all orders (not just delivered)
+      // Calculate COGS only for orders that aren't marked as returned/received
+      const activeOrders = orders.filter(order => order.return_received !== true);
       let totalCOGS = 0;
       
-      orders.forEach(order => {
+      activeOrders.forEach(order => {
         if (!order.product_name) return;
         
         const parsedProducts = parseProductDescriptions(order.product_name);

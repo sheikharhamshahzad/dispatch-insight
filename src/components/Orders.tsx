@@ -672,8 +672,33 @@ export function Orders() {
     let totalCOGS = 0;
     let productCOGSBreakdown: Record<string, number> = {};
     
-    // Calculate COGS for each product
-    Object.entries(productTotals).forEach(([product, data]) => {
+    // Only include orders that are NOT marked as return_received
+    const activeOrders = orders.filter(order => order.return_received !== true);
+    
+    console.log(`Total orders: ${orders.length}, Active orders (not returned): ${activeOrders.length}`);
+    
+    // Create a new product totals object just for COGS calculation
+    const cogsProductTotals: Record<string, number> = {};
+    
+    // Process active orders only
+    activeOrders.forEach(order => {
+      if (!order.product_name) return;
+      
+      const parsedProducts = parseProductDescriptions(order.product_name);
+      
+      parsedProducts.forEach(({ product, quantity }) => {
+        // Track products only from active orders
+        if (!cogsProductTotals[product]) {
+          cogsProductTotals[product] = 0;
+        }
+        cogsProductTotals[product] += quantity;
+      });
+    });
+    
+    // Calculate COGS based on active products only
+    Object.entries(cogsProductTotals).forEach(([product, quantity]) => {
+      if (quantity <= 0) return; // Skip if quantity is 0 or negative
+    
       const productNameLower = product.toLowerCase();
       // Try to find an exact match first
       let productCOGS = cogsMap[productNameLower];
@@ -689,13 +714,16 @@ export function Orders() {
       }
       
       if (productCOGS !== undefined) {
-        const productTotalCOGS = productCOGS * data.total;
+        const productTotalCOGS = productCOGS * quantity;
         totalCOGS += productTotalCOGS;
         productCOGSBreakdown[product] = productTotalCOGS;
+        
+        // Log for debugging
+        console.log(`Product: ${product}, Active Quantity: ${quantity}, COGS: ${productTotalCOGS}`);
       }
     });
     
-    // Calculate courier statistics
+    // Calculate courier statistics (we still want to include all courier fees for historical record)
     const totalCourierFees = orders.reduce((sum, order) => sum + (order.courier_fee || 0), 0);
     const avgCourierFee = orders.length > 0 ? totalCourierFees / orders.length : 0;
     
