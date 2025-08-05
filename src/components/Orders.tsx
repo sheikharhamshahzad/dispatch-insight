@@ -146,7 +146,10 @@ export function Orders() {
     totalCOGS: 0,
     totalCourierFees: 0,
     avgCourierFee: 0,
-    productCOGSBreakdown: {} as Record<string, number>
+    productCOGSBreakdown: {} as Record<string, number>,
+    deliveredAndReturnedCount: 0,
+    deliveredCount: 0,
+    returnedCount: 0
   });
 
   // Add this state to your Orders component
@@ -477,15 +480,25 @@ export function Orders() {
   };
 
   const getStatusBadge = (status: string) => {
-    const statusColors = {
-      dispatched: "bg-blue-100 text-blue-800 hover:bg-blue-100",
+    const statusColors: Record<string, string> = {
       delivered: "bg-green-100 text-green-800 hover:bg-green-100",
       returned: "bg-yellow-100 text-yellow-800 hover:bg-yellow-100",
-      failed: "bg-red-100 text-red-800 hover:bg-red-100",
+      unbooked: "bg-gray-100 text-gray-800 hover:bg-gray-100",
+      "postex warehouse": "bg-purple-100 text-purple-800 hover:bg-purple-100",
+      "out for delivery": "bg-blue-100 text-blue-800 hover:bg-blue-100",
+      "picked by postex": "bg-indigo-100 text-indigo-800 hover:bg-indigo-100",
+      "delivery under review": "bg-orange-100 text-orange-800 hover:bg-orange-100",
+      "out for return": "bg-red-100 text-red-800 hover:bg-red-100",
+      attempted: "bg-pink-100 text-pink-800 hover:bg-pink-100",
+      dispatched: "bg-blue-100 text-blue-800 hover:bg-blue-100", // Keep for backward compatibility
+      failed: "bg-red-100 text-red-800 hover:bg-red-100", // Keep for backward compatibility
     };
     
+    // Normalize the status by converting to lowercase
+    const normalizedStatus = status.toLowerCase();
+    
     return (
-      <Badge className={statusColors[status as keyof typeof statusColors] || "bg-gray-100 text-gray-800"}>
+      <Badge className={statusColors[normalizedStatus] || "bg-gray-100 text-gray-800"}>
         {status}
       </Badge>
     );
@@ -738,16 +751,23 @@ export function Orders() {
       }
     });
     
-    // Calculate courier statistics (we still want to include all courier fees for historical record)
-    const totalCourierFees = orders.reduce((sum, order) => sum + (order.courier_fee || 0), 0);
-    const avgCourierFee = orders.length > 0 ? totalCourierFees / orders.length : 0;
+    // Calculate courier statistics only for delivered and returned orders
+    const deliveredOrders = orders.filter(order => order.order_status === 'delivered');
+    const returnedOrders = orders.filter(order => order.order_status === 'returned');
+    const deliveredAndReturnedOrders = [...deliveredOrders, ...returnedOrders];
+    
+    const totalCourierFees = deliveredAndReturnedOrders.reduce((sum, order) => sum + (order.courier_fee || 0), 0);
+    const avgCourierFee = deliveredAndReturnedOrders.length > 0 ? totalCourierFees / deliveredAndReturnedOrders.length : 0;
     
     // Update stats
     setCogsStats({
       totalCOGS,
       totalCourierFees,
       avgCourierFee,
-      productCOGSBreakdown
+      productCOGSBreakdown,
+      deliveredAndReturnedCount: deliveredAndReturnedOrders.length,
+      deliveredCount: deliveredOrders.length,
+      returnedCount: returnedOrders.length
     });
   };
 
@@ -1132,7 +1152,7 @@ export function Orders() {
               <div className="text-sm font-medium text-muted-foreground mb-1">Total Courier Fees</div>
               <div className="text-2xl font-bold">PKR {cogsStats.totalCourierFees.toLocaleString()}</div>
               <div className="text-xs text-muted-foreground mt-1">
-                For {orders.length} orders
+                For {cogsStats.deliveredCount} delivered & {cogsStats.returnedCount} returned orders
               </div>
             </div>
             
@@ -1140,7 +1160,7 @@ export function Orders() {
               <div className="text-sm font-medium text-muted-foreground mb-1">Avg Courier Fee</div>
               <div className="text-2xl font-bold">PKR {cogsStats.avgCourierFee.toFixed(2)}</div>
               <div className="text-xs text-muted-foreground mt-1">
-                Per order
+                Per delivered/returned order
               </div>
             </div>
           </div>
@@ -1203,10 +1223,9 @@ export function Orders() {
                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
                             </svg>
-                            <span className="sr-only">Filter by status</span>
                           </Button>
                         </PopoverTrigger>
-                        <PopoverContent className="w-[200px] p-0" align="start">
+                        <PopoverContent className="w-[240px] p-0" align="start">
                           <div className="p-2 space-y-1">
                             <div className="font-medium text-sm px-2 py-1">Filter by status</div>
                             <div className="border-t my-1"></div>
@@ -1224,7 +1243,7 @@ export function Orders() {
                               className="w-full justify-start"
                               onClick={() => handleStatusFilterChange("delivered")}
                             >
-                              <span className="bg-green-100 text-green-800 text-xs font-medium px-2 py-0.5 rounded mr-2">Delivered</span>
+                              <span className="bg-green-100 text-green-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
                               Delivered
                             </Button>
                             <Button 
@@ -1233,26 +1252,71 @@ export function Orders() {
                               className="w-full justify-start"
                               onClick={() => handleStatusFilterChange("returned")}
                             >
-                              <span className="bg-yellow-100 text-yellow-800 text-xs font-medium px-2 py-0.5 rounded mr-2">Returned</span>
+                              <span className="bg-yellow-100 text-yellow-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
                               Returned
                             </Button>
                             <Button 
-                              variant={statusFilter === "dispatched" ? "default" : "ghost"} 
+                              variant={statusFilter === "unbooked" ? "default" : "ghost"} 
                               size="sm"
                               className="w-full justify-start"
-                              onClick={() => handleStatusFilterChange("dispatched")}
+                              onClick={() => handleStatusFilterChange("unbooked")}
                             >
-                              <span className="bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded mr-2">Dispatched</span>
-                              Dispatched
+                              <span className="bg-gray-100 text-gray-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
+                              Unbooked
                             </Button>
                             <Button 
-                              variant={statusFilter === "failed" ? "default" : "ghost"} 
+                              variant={statusFilter === "postex warehouse" ? "default" : "ghost"} 
                               size="sm"
                               className="w-full justify-start"
-                              onClick={() => handleStatusFilterChange("failed")}
+                              onClick={() => handleStatusFilterChange("postex warehouse")}
                             >
-                              <span className="bg-red-100 text-red-800 text-xs font-medium px-2 py-0.5 rounded mr-2">Failed</span>
-                              Failed
+                              <span className="bg-purple-100 text-purple-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
+                              PostEx WareHouse
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "out for delivery" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("out for delivery")}
+                            >
+                              <span className="bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
+                              Out For Delivery
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "picked by postex" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("picked by postex")}
+                            >
+                              <span className="bg-indigo-100 text-indigo-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
+                              Picked By PostEx
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "delivery under review" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("delivery under review")}
+                            >
+                              <span className="bg-orange-100 text-orange-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
+                              Delivery Under Review
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "out for return" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("out for return")}
+                            >
+                              <span className="bg-red-100 text-red-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
+                              Out For Return
+                            </Button>
+                            <Button 
+                              variant={statusFilter === "attempted" ? "default" : "ghost"} 
+                              size="sm"
+                              className="w-full justify-start"
+                              onClick={() => handleStatusFilterChange("attempted")}
+                            >
+                              <span className="bg-pink-100 text-pink-800 text-xs font-medium px-2 py-0.5 rounded mr-2">•</span>
+                              Attempted
                             </Button>
                           </div>
                         </PopoverContent>
