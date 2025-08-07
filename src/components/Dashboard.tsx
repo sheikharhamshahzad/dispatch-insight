@@ -7,6 +7,7 @@ import { parseProductDescriptions } from "@/components/Orders"; // Import the he
 
 interface DashboardStats {
   totalDispatched: number;
+  totalDelivered: number; // Add this new property
   totalReturned: number;
   returnsReceived: number;
   totalRevenue: number;
@@ -29,6 +30,7 @@ export function Dashboard() {
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
   const [stats, setStats] = useState<DashboardStats>({
     totalDispatched: 0,
+    totalDelivered: 0, // Initialize the new property
     totalReturned: 0,
     returnsReceived: 0,
     totalRevenue: 0,
@@ -84,6 +86,7 @@ export function Dashboard() {
 
       // Process orders and calculate statistics
       const totalDispatched = orders.length;
+      const totalDelivered = orders.filter(order => order.order_status === 'delivered').length;
       const totalReturned = orders.filter(order => order.order_status === 'returned').length;
       const returnsReceived = orders.filter(order => order.return_received).length;
       const totalRevenue = orders
@@ -134,6 +137,7 @@ export function Dashboard() {
 
       setStats({
         totalDispatched,
+        totalDelivered,
         totalReturned,
         returnsReceived,
         totalRevenue,
@@ -252,36 +256,69 @@ export function Dashboard() {
         </Card>
       </div>
 
-      {/* COGS Analysis */}
+      {/* Profit Analysis - replacing the COGS Analysis section */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">COGS Analysis</CardTitle>
-          <ShoppingCart className="h-4 w-4 text-muted-foreground" />
+          <CardTitle className="text-sm font-medium">Profit Analysis</CardTitle>
+          <TrendingUp className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-3">
-            <div className="flex justify-between items-center p-3 border rounded-md">
-              <span className="font-medium">Total COGS</span>
-              <span className="text-lg font-bold">PKR {stats.totalCOGS.toLocaleString()}</span>
+          <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
+            <div className="flex flex-col justify-between p-3 border rounded-md">
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-medium">Profit Margin</span>
+                <span className={`text-lg font-bold ${stats.netProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {stats.totalRevenue > 0 ? ((stats.netProfit / stats.totalRevenue) * 100).toFixed(1) : '0'}%
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">Net profit as % of revenue</p>
             </div>
-            <div className="flex justify-between items-center p-3 border rounded-md">
-              <span className="font-medium">COGS per Order</span>
-              <span className="text-lg font-bold">
-                PKR {stats.totalDispatched > 0 ? (stats.totalCOGS / stats.totalDispatched).toFixed(2) : '0'}
-              </span>
+            
+            <div className="flex flex-col justify-between p-3 border rounded-md">
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-medium">COGS</span>
+                <span className="text-lg font-bold">
+                  {stats.totalRevenue > 0 ? ((stats.totalCOGS / stats.totalRevenue) * 100).toFixed(1) : '0'}%
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">Cost of goods sold</p>
             </div>
-            <div className="flex justify-between items-center p-3 border rounded-md">
-              <span className="font-medium">COGS % of Revenue</span>
-              <span className="text-lg font-bold">
-                {stats.totalRevenue > 0 ? ((stats.totalCOGS / stats.totalRevenue) * 100).toFixed(1) : '0'}%
-              </span>
+            
+            <div className="flex flex-col justify-between p-3 border rounded-md">
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-medium">Courier</span>
+                <span className="text-lg font-bold">
+                  {stats.totalRevenue > 0 ? ((stats.totalCourierFees / stats.totalRevenue) * 100).toFixed(1) : '0'}%
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">Shipping costs</p>
+            </div>
+            
+            <div className="flex flex-col justify-between p-3 border rounded-md">
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-medium">Ad Spend</span>
+                <span className="text-lg font-bold">
+                  {stats.totalRevenue > 0 ? ((stats.totalAdSpend / stats.totalRevenue) * 100).toFixed(1) : '0'}%
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">Marketing costs</p>
+            </div>
+            
+            <div className="flex flex-col justify-between p-3 border rounded-md">
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-medium">Packaging</span>
+                <span className="text-lg font-bold">
+                  {stats.totalRevenue > 0 ? ((stats.totalPackagingCost / stats.totalRevenue) * 100).toFixed(1) : '0'}%
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">Packaging materials</p>
             </div>
           </div>
         </CardContent>
       </Card>
 
       {/* Operations Overview */}
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Parcels Dispatched</CardTitle>
@@ -290,6 +327,22 @@ export function Dashboard() {
           <CardContent>
             <div className="text-2xl font-bold">{stats.totalDispatched}</div>
             <p className="text-xs text-muted-foreground">Total orders sent out</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Delivered Orders</CardTitle>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 text-muted-foreground">
+              <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+              <path d="M1.42 9a16 16 0 0 1 21.16 0" />
+              <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+              <line x1="12" y1="20" x2="12" y2="20" />
+            </svg>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{stats.totalDelivered}</div>
+            <p className="text-xs text-muted-foreground">Successfully delivered</p>
           </CardContent>
         </Card>
 

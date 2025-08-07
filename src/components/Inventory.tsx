@@ -101,7 +101,7 @@ export function Inventory() {
   };
 
   const totalInventoryValue = products.reduce((sum, product) => sum + (product.cogs * product.current_stock), 0);
-  const lowStockProducts = products.filter(product => product.current_stock < 10);
+  const lowStockProducts = products.filter(product => product.current_stock > 0 && product.current_stock < 10);
   const outOfStockProducts = products.filter(product => product.current_stock === 0);
 
   return (
