@@ -269,6 +269,31 @@ export function Orders() {
     try {
       const { dist } = orderData;
       
+      // Calculate courier fee based on order status
+      // For returned orders, use reversalFee + reversalTax
+      // For other statuses, use transactionFee + transactionTax
+      const isReturned = dist.transactionStatus.toLowerCase() === 'returned';
+      
+      // Add logging to debug the values
+      console.log("Order status:", dist.transactionStatus);
+      console.log("Is returned:", isReturned);
+      console.log("transactionFee:", dist.transactionFee);
+      console.log("transactionTax:", dist.transactionTax);
+      console.log("reversalFee:", dist.reversalFee);
+      console.log("reversalTax:", dist.reversalTax);
+      
+      // Ensure we handle undefined values with defaults of 0
+      const transactionFee = dist.transactionFee || 0;
+      const transactionTax = dist.transactionTax || 0;
+      const reversalFee = dist.reversalFee || 0;
+      const reversalTax = dist.reversalTax || 0;
+      
+      const courierFee = isReturned 
+        ? (reversalFee + reversalTax)
+        : (transactionFee + transactionTax);
+      
+      console.log("Calculated courier fee:", courierFee);
+      
       const order = {
         tracking_number: dist.trackingNumber,
         order_id: dist.orderRefNumber,
@@ -280,7 +305,7 @@ export function Orders() {
         amount: dist.invoicePayment,
         order_status: dist.transactionStatus.toLowerCase(),
         dispatch_date: dist.transactionDate,
-        courier_fee: dist.transactionFee + dist.transactionTax,
+        courier_fee: courierFee,
         return_received: false // Default value for new orders
       };
 

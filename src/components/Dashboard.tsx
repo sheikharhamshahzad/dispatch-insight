@@ -2,12 +2,14 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
-import { TrendingUp, TrendingDown, Package, RefreshCw, ShoppingCart, AlertCircle, Truck, Package2 } from "lucide-react";
+import { TrendingUp, TrendingDown, Package, RefreshCw, ShoppingCart, AlertCircle, Truck, Package2, Pencil, Save } from "lucide-react";
 import { parseProductDescriptions } from "@/components/Orders"; // Import the helper function
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 interface DashboardStats {
   totalDispatched: number;
-  totalDelivered: number; // Add this new property
+  totalDelivered: number;
   totalReturned: number;
   returnsReceived: number;
   totalRevenue: number;
@@ -15,6 +17,7 @@ interface DashboardStats {
   totalAdSpend: number;
   totalCOGS: number;
   totalPackagingCost: number;
+  totalSalesTax: number;
   netProfit: number;
   avgCourierFee: number;
 }
@@ -28,9 +31,12 @@ interface InventoryItem {
 
 export function Dashboard() {
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [salesTax, setSalesTax] = useState(0);
+  const [salesTaxInput, setSalesTaxInput] = useState("0");
+  const [isSalesTaxEditing, setIsSalesTaxEditing] = useState(true);
   const [stats, setStats] = useState<DashboardStats>({
     totalDispatched: 0,
-    totalDelivered: 0, // Initialize the new property
+    totalDelivered: 0,
     totalReturned: 0,
     returnsReceived: 0,
     totalRevenue: 0,
@@ -38,14 +44,80 @@ export function Dashboard() {
     totalAdSpend: 0,
     totalCOGS: 0,
     totalPackagingCost: 0,
+    totalSalesTax: 0,
     netProfit: 0,
     avgCourierFee: 0,
   });
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [isLoadingSalesTax, setIsLoadingSalesTax] = useState(true);
+
+  // Fetch saved sales tax from Supabase when component mounts
+  useEffect(() => {
+    async function fetchSalesTax() {
+      try {
+        const { data, error } = await supabase
+          .from('settings')
+          .select('value')
+          .eq('key', 'sales_tax')
+          .single();
+        
+        if (error) {
+          console.error('Error fetching sales tax setting:', error);
+          return;
+        }
+        
+        if (data) {
+          const taxValue = parseFloat(data.value);
+          if (!isNaN(taxValue)) {
+            setSalesTax(taxValue);
+            setSalesTaxInput(taxValue.toString());
+            setIsSalesTaxEditing(false);
+          }
+        }
+      } catch (error) {
+        console.error('Error in fetchSalesTax:', error);
+      } finally {
+        setIsLoadingSalesTax(false);
+      }
+    }
+    
+    fetchSalesTax();
+  }, []);
 
   useEffect(() => {
-    fetchDashboardData();
-  }, [selectedMonth]);
+    if (!isLoadingSalesTax) {
+      fetchDashboardData();
+    }
+  }, [selectedMonth, salesTax, isLoadingSalesTax]);
+
+  const handleSaveClick = async () => {
+    const taxValue = parseFloat(salesTaxInput);
+    if (!isNaN(taxValue) && taxValue >= 0) {
+      try {
+        // Update the sales tax in Supabase
+        const { error } = await supabase
+          .from('settings')
+          .update({ value: taxValue.toString(), updated_at: new Date().toISOString() })
+          .eq('key', 'sales_tax');
+        
+        if (error) {
+          console.error('Error updating sales tax:', error);
+          return;
+        }
+        
+        // Update local state
+        setSalesTax(taxValue);
+        setIsSalesTaxEditing(false);
+      } catch (error) {
+        console.error('Error in handleSaveClick:', error);
+      }
+    }
+  };
+
+  const handleEditClick = () => {
+    setIsSalesTaxEditing(true);
+    setSalesTaxInput(salesTax.toString());
+  };
 
   const fetchDashboardData = async () => {
     const startDate = `${selectedMonth}-01`;
@@ -102,6 +174,9 @@ export function Dashboard() {
       // Calculate packaging costs
       const totalPackagingCost = packagingCosts.reduce((sum, cost) => sum + cost.amount, 0);
       
+      // Calculate sales tax
+      const totalSalesTax = (salesTax / 100) * totalRevenue;
+      
       // Calculate COGS only for orders that aren't marked as returned/received
       const activeOrders = orders.filter(order => order.return_received !== true);
       let totalCOGS = 0;
@@ -132,8 +207,8 @@ export function Dashboard() {
         });
       });
 
-      // Update net profit calculation to include packaging costs
-      const netProfit = totalRevenue - totalCourierFees - totalAdSpend - totalCOGS - totalPackagingCost;
+      // Update net profit calculation to include sales tax
+      const netProfit = totalRevenue - totalCourierFees - totalAdSpend - totalCOGS - totalPackagingCost - totalSalesTax;
 
       setStats({
         totalDispatched,
@@ -145,6 +220,7 @@ export function Dashboard() {
         totalAdSpend,
         totalCOGS,
         totalPackagingCost,
+        totalSalesTax,
         netProfit,
         avgCourierFee,
       });
@@ -157,24 +233,68 @@ export function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold">Dashboard Overview</h2>
-        <Select value={selectedMonth} onValueChange={setSelectedMonth}>
-          <SelectTrigger className="w-48">
-            <SelectValue placeholder="Select month" />
-          </SelectTrigger>
-          <SelectContent>
-            {Array.from({ length: 12 }, (_, i) => {
-              const date = new Date();
-              date.setMonth(date.getMonth() - i);
-              const value = date.toISOString().slice(0, 7);
-              const label = date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
-              return (
-                <SelectItem key={value} value={value}>
-                  {label}
-                </SelectItem>
-              );
-            })}
-          </SelectContent>
-        </Select>
+        <div className="flex gap-4 items-center">
+          {/* Sales Tax Input */}
+          <div className="flex items-center gap-2">
+            <div className="flex items-center">
+              <span className="text-sm font-medium mr-2">Sales Tax (%)</span>
+              {isLoadingSalesTax ? (
+                <div className="w-16 h-9 bg-gray-100 animate-pulse rounded-md"></div>
+              ) : isSalesTaxEditing ? (
+                <div className="flex items-center">
+                  <Input 
+                    type="number" 
+                    className="w-16 h-9" 
+                    value={salesTaxInput}
+                    onChange={(e) => setSalesTaxInput(e.target.value)} 
+                  />
+                  <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="h-9 w-9 ml-2" 
+                    onClick={handleSaveClick}
+                  >
+                    <Save className="h-4 w-4" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="font-medium bg-gray-100 py-1 px-3 rounded-md text-gray-500">
+                    {salesTax}%
+                  </span>
+                  <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="h-8 w-8" 
+                    onClick={handleEditClick}
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Month Selection */}
+          <Select value={selectedMonth} onValueChange={setSelectedMonth}>
+            <SelectTrigger className="w-48">
+              <SelectValue placeholder="Select month" />
+            </SelectTrigger>
+            <SelectContent>
+              {Array.from({ length: 12 }, (_, i) => {
+                const date = new Date();
+                date.setMonth(date.getMonth() - i);
+                const value = date.toISOString().slice(0, 7);
+                const label = date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+                return (
+                  <SelectItem key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {/* Financial Overview */}
@@ -246,6 +366,25 @@ export function Dashboard() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Sales Tax</CardTitle>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 text-muted-foreground">
+              <path d="M2 17a5 5 0 0 0 10 0c0-2.76-2.5-5-5-3-2.5-2-5 .24-5 3Z"/>
+              <path d="M12 17a5 5 0 0 0 10 0c0-2.76-2.5-5-5-3-2.5-2-5 .24-5 3Z"/>
+              <path d="M7 14c3.22-2.91 4.29-8.75 5-12 1.66 2.38 4.94 9 5 12"/>
+              <path d="M22 9c-4.29 0-7.14-2.33-10-7 5.71 0 10 4.67 10 7Z"/>
+            </svg>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">PKR {stats.totalSalesTax.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground">{salesTax}% of Revenue</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* COGS card moved to second row */}
+      <div className="grid gap-4 md:grid-cols-1">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">COGS</CardTitle>
             <ShoppingCart className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
@@ -256,7 +395,7 @@ export function Dashboard() {
         </Card>
       </div>
 
-      {/* Profit Analysis - replacing the COGS Analysis section */}
+      {/* Profit Analysis */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-sm font-medium">Profit Analysis</CardTitle>
