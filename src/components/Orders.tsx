@@ -534,8 +534,8 @@ export function Orders() {
     try {
       const newStatus = !order.return_received;
       
-      // If marking as received, add to inventory
-      // If unmarking as received, remove from inventory
+      // If marking as received, add to inventory (regardless of whether the order was 
+      // delivered or returned, as we want to increase inventory when items come back)
       if (newStatus) {
         // Add to inventory when return is received
         await processInventoryUpdates(order.product_name, 1);
@@ -710,75 +710,48 @@ export function Orders() {
     let totalCOGS = 0;
     let productCOGSBreakdown: Record<string, number> = {};
     
-    // First, calculate all dispatched products
-    const dispatchedProducts: Record<string, number> = {};
+    // Only consider delivered orders for COGS calculation
+    const deliveredOrders = orders.filter(order => order.order_status === 'delivered');
+    const returnedOrders = orders.filter(order => order.order_status === 'returned');
     
-    // Then, calculate all returned and received products
-    const returnedReceivedProducts: Record<string, number> = {};
-    
-    // Process all orders first
-    orders.forEach(order => {
+    // Process delivered orders to calculate COGS
+    deliveredOrders.forEach(order => {
       if (!order.product_name) return;
       
       const parsedProducts = parseProductDescriptions(order.product_name);
       
       parsedProducts.forEach(({ product, variant, quantity }) => {
-        // Track all dispatched products
-        if (!dispatchedProducts[product]) {
-          dispatchedProducts[product] = 0;
-        }
-        dispatchedProducts[product] += quantity;
+        const productNameLower = product.toLowerCase();
+        // Try to find an exact match first
+        let productCOGS = cogsMap[productNameLower];
         
-        // Separately track returned and received products
-        if (order.order_status === 'returned' && order.return_received) {
-          if (!returnedReceivedProducts[product]) {
-            returnedReceivedProducts[product] = 0;
+        // If no exact match, try to find a partial match
+        if (productCOGS === undefined) {
+          const matchingProduct = Object.keys(cogsMap).find(key => 
+            productNameLower.includes(key) || key.includes(productNameLower)
+          );
+          if (matchingProduct) {
+            productCOGS = cogsMap[matchingProduct];
           }
-          returnedReceivedProducts[product] += quantity;
+        }
+        
+        if (productCOGS !== undefined) {
+          const productTotalCOGS = productCOGS * quantity;
+          totalCOGS += productTotalCOGS;
+          
+          // Track product-specific COGS
+          if (!productCOGSBreakdown[product]) {
+            productCOGSBreakdown[product] = 0;
+          }
+          productCOGSBreakdown[product] += productTotalCOGS;
+          
+          // Log for debugging
+          console.log(`Product: ${product}, Quantity: ${quantity}, COGS: ${productTotalCOGS}`);
         }
       });
     });
     
-    // Calculate net quantities (dispatched minus returned)
-    const netProducts: Record<string, number> = {};
-    
-    Object.keys(dispatchedProducts).forEach(product => {
-      const dispatched = dispatchedProducts[product] || 0;
-      const returned = returnedReceivedProducts[product] || 0;
-      netProducts[product] = Math.max(0, dispatched - returned);
-    });
-    
-    // Calculate COGS for each product based on net quantities
-    Object.entries(netProducts).forEach(([product, netQuantity]) => {
-      if (netQuantity <= 0) return; // Skip if all units are returned
-      
-      const productNameLower = product.toLowerCase();
-      // Try to find an exact match first
-      let productCOGS = cogsMap[productNameLower];
-      
-      // If no exact match, try to find a partial match
-      if (productCOGS === undefined) {
-        const matchingProduct = Object.keys(cogsMap).find(key => 
-          productNameLower.includes(key) || key.includes(productNameLower)
-        );
-        if (matchingProduct) {
-          productCOGS = cogsMap[matchingProduct];
-        }
-      }
-      
-      if (productCOGS !== undefined) {
-        const productTotalCOGS = productCOGS * netQuantity;
-        totalCOGS += productTotalCOGS;
-        productCOGSBreakdown[product] = productTotalCOGS;
-        
-        // Log for debugging
-        console.log(`Product: ${product}, Total: ${dispatchedProducts[product]}, Returned: ${returnedReceivedProducts[product] || 0}, Net: ${netQuantity}, COGS: ${productTotalCOGS}`);
-      }
-    });
-    
-    // Calculate courier statistics only for delivered and returned orders
-    const deliveredOrders = orders.filter(order => order.order_status === 'delivered');
-    const returnedOrders = orders.filter(order => order.order_status === 'returned');
+    // Calculate courier statistics for delivered and returned orders
     const deliveredAndReturnedOrders = [...deliveredOrders, ...returnedOrders];
     
     const totalCourierFees = deliveredAndReturnedOrders.reduce((sum, order) => sum + (order.courier_fee || 0), 0);
