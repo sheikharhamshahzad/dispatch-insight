@@ -154,29 +154,33 @@ export function Packaging() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold">Packaging Costs</h2>
-          <p className="text-muted-foreground">Track expenses for boxes, tape, bubble wrap, and other packaging materials</p>
+          <p className="text-muted-foreground">
+            Track expenses for boxes, tape, bubble wrap, and other packaging materials
+          </p>
         </div>
-        <Select value={selectedMonth} onValueChange={setSelectedMonth}>
-          <SelectTrigger className="w-48">
-            <SelectValue placeholder="Select month" />
-          </SelectTrigger>
-          <SelectContent>
-            {Array.from({ length: 12 }, (_, i) => {
-              const date = new Date();
-              date.setMonth(date.getMonth() - i);
-              const value = date.toISOString().slice(0, 7);
-              const label = date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
-              return (
-                <SelectItem key={value} value={value}>
-                  {label}
-                </SelectItem>
-              );
-            })}
-          </SelectContent>
-        </Select>
+        <div className="w-full md:w-auto mt-2 md:mt-0">
+          <Select value={selectedMonth} onValueChange={setSelectedMonth}>
+            <SelectTrigger className="w-full md:w-48">
+              <SelectValue placeholder="Select month" />
+            </SelectTrigger>
+            <SelectContent>
+              {Array.from({ length: 12 }, (_, i) => {
+                const date = new Date();
+                date.setMonth(date.getMonth() - i);
+                const value = date.toISOString().slice(0, 7);
+                const label = date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+                return (
+                  <SelectItem key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {/* Monthly Summary */}

@@ -136,31 +136,64 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
       if (orderData && orderData.statusCode === "200") {
         const { dist } = orderData;
         
-        // Get new status and fees
+        // Get new status
         const newStatus = dist.transactionStatus.toLowerCase();
-        const transactionFee = dist.transactionFee;
-        const transactionTax = dist.transactionTax;
         
-        // Check if status or fees changed
-        const hasNewStatus = newStatus !== order.order_status;
-        const hasFees = transactionFee > 0 || transactionTax > 0;
-        
-        if (hasNewStatus || hasFees) {
-          const success = await updateOrderStatusAndFee(
-            order.tracking_number, 
-            newStatus, 
-            transactionFee, 
-            transactionTax
-          );
-          
-          if (success) {
-            updatedCount++;
+        // Only proceed if status changed
+        if (newStatus !== order.order_status) {
+          // Different update logic based on new status
+          if (newStatus === 'delivered') {
+            // For delivered orders, update status and courier fee using transactionFee + transactionTax
+            const transactionFee = dist.transactionFee || 0;
+            const transactionTax = dist.transactionTax || 0;
+            const courierFee = transactionFee + transactionTax;
+            
+            await supabase
+              .from('orders')
+              .update({ 
+                order_status: newStatus,
+                courier_fee: courierFee
+              })
+              .eq('tracking_number', order.tracking_number);
+              
             console.log(
               `Updated order ${order.tracking_number}: ` +
               `status ${order.order_status} → ${newStatus}, ` +
-              `courier fee: ${transactionFee + transactionTax}`
+              `courier fee: ${courierFee}`
+            );
+          } else if (newStatus === 'returned') {
+            // For returned orders, update status and courier fee using reversalFee + reversalTax
+            const reversalFee = dist.reversalFee || 0;
+            const reversalTax = dist.reversalTax || 0;
+            const courierFee = reversalFee + reversalTax;
+            
+            await supabase
+              .from('orders')
+              .update({ 
+                order_status: newStatus,
+                courier_fee: courierFee
+              })
+              .eq('tracking_number', order.tracking_number);
+              
+            console.log(
+              `Updated order ${order.tracking_number}: ` +
+              `status ${order.order_status} → ${newStatus}, ` +
+              `courier fee: ${courierFee}`
+            );
+          } else {
+            // For other status updates, just update the status without changing the courier fee
+            await supabase
+              .from('orders')
+              .update({ order_status: newStatus })
+              .eq('tracking_number', order.tracking_number);
+              
+            console.log(
+              `Updated order ${order.tracking_number}: ` +
+              `status ${order.order_status} → ${newStatus}`
             );
           }
+          
+          updatedCount++;
         }
       }
       

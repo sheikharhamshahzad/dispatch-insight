@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -155,34 +155,36 @@ export function Orders() {
   // Add this state to your Orders component
   const [isCheckingStatuses, setIsCheckingStatuses] = useState(false);
 
+  // Add a request sequence ref to ignore stale responses
+  const fetchSeq = useRef(0);
+
   useEffect(() => {
     fetchOrders();
   }, [selectedMonth, date, useCustomDateRange, searchQuery, statusFilter]); // Add statusFilter to dependency array
 
   const fetchOrders = async () => {
+    const seq = ++fetchSeq.current;
+
     let query = supabase.from('orders').select('*');
     
     // Apply date filtering
-    if (useCustomDateRange && date) {
-      // If we have a custom date range
-      if (date.from) {
-        const formattedFrom = format(date.from, 'yyyy-MM-dd');
-        query = query.gte('dispatch_date', formattedFrom);
-        
-        if (date.to) {
-          // If we have both from and to dates
-          const formattedTo = format(date.to, 'yyyy-MM-dd');
-          query = query.lte('dispatch_date', formattedTo);
-        } else {
-          // If we only have a from date, only show that specific date
-          query = query.lte('dispatch_date', formattedFrom);
-        }
-      }
+    if (useCustomDateRange && date?.from) {
+      // Build a half-open interval: [from, toNextDay)
+      const fromStr = format(date.from, 'yyyy-MM-dd');
+      const toDate = date.to ?? date.from;
+      const toNextDay = new Date(toDate.getFullYear(), toDate.getMonth(), toDate.getDate() + 1);
+      const toNextDayStr = format(toNextDay, 'yyyy-MM-dd');
+
+      query = query.gte('dispatch_date', fromStr).lt('dispatch_date', toNextDayStr);
     } else {
-      // Use month-based filtering
-      const startDate = `${selectedMonth}-01`;
-      const endDate = `${selectedMonth}-31`;
-      query = query.gte('dispatch_date', startDate).lte('dispatch_date', endDate);
+      // Month-based filtering using half-open interval for the whole month
+      const [year, month] = selectedMonth.split('-').map(Number); // e.g. "2025-08"
+      const monthStart = new Date(year, month - 1, 1);
+      const nextMonthStart = new Date(year, month, 1);
+      const monthStartStr = format(monthStart, 'yyyy-MM-dd');
+      const nextMonthStartStr = format(nextMonthStart, 'yyyy-MM-dd');
+
+      query = query.gte('dispatch_date', monthStartStr).lt('dispatch_date', nextMonthStartStr);
     }
     
     // Apply search query if it exists
@@ -197,6 +199,9 @@ export function Orders() {
 
     const { data, error } = await query.order('dispatch_date', { ascending: false });
 
+    // Ignore stale responses
+    if (seq !== fetchSeq.current) return;
+
     if (error) {
       toast({
         title: "Error",
@@ -204,7 +209,6 @@ export function Orders() {
         variant: "destructive",
       });
     } else {
-      // Map the data to ensure it matches the Order interface
       const mappedOrders = (data || []).map(item => {
         return {
           id: item.id,
@@ -212,14 +216,14 @@ export function Orders() {
           order_id: item.order_id,
           customer_name: item.customer_name,
           customer_address: item.customer_address,
-          customer_phone: item.customer_phone || '',  // Default empty string if missing
+          customer_phone: item.customer_phone || '',
           product_name: item.product_name,
           amount: item.amount,
           order_status: item.order_status,
           dispatch_date: item.dispatch_date,
           return_received: item.return_received,
           courier_fee: item.courier_fee,
-          customer_city: item.customer_city || ''  // Default empty string if missing
+          customer_city: item.customer_city || ''
         };
       });
       
@@ -270,17 +274,19 @@ export function Orders() {
       const { dist } = orderData;
       
       // Calculate courier fee based on order status
-      // For returned orders, use reversalFee + reversalTax
-      // For other statuses, use transactionFee + transactionTax
       const isReturned = dist.transactionStatus.toLowerCase() === 'returned';
       
-      // Add logging to debug the values
-      console.log("Order status:", dist.transactionStatus);
-      console.log("Is returned:", isReturned);
-      console.log("transactionFee:", dist.transactionFee);
-      console.log("transactionTax:", dist.transactionTax);
-      console.log("reversalFee:", dist.reversalFee);
-      console.log("reversalTax:", dist.reversalTax);
+      // Log all relevant values with better formatting
+      console.log("Order details:", {
+        trackingNumber: dist.trackingNumber,
+        orderRef: dist.orderRefNumber,
+        status: dist.transactionStatus,
+        isReturned,
+        transactionFee: dist.transactionFee,
+        transactionTax: dist.transactionTax,
+        reversalFee: dist.reversalFee,
+        reversalTax: dist.reversalTax
+      });
       
       // Ensure we handle undefined values with defaults of 0
       const transactionFee = dist.transactionFee || 0;
@@ -288,11 +294,18 @@ export function Orders() {
       const reversalFee = dist.reversalFee || 0;
       const reversalTax = dist.reversalTax || 0;
       
+      // For returned orders, use reversalFee + reversalTax
+      // For other statuses, use transactionFee + transactionTax
       const courierFee = isReturned 
         ? (reversalFee + reversalTax)
         : (transactionFee + transactionTax);
       
       console.log("Calculated courier fee:", courierFee);
+      
+      // If courier fee is 0 for a delivered order, log a warning
+      if (courierFee === 0 && dist.transactionStatus.toLowerCase() === 'delivered') {
+        console.warn(`Warning: Zero courier fee for delivered order ${dist.trackingNumber}. API may not have provided fee data.`);
+      }
       
       const order = {
         tracking_number: dist.trackingNumber,
@@ -312,12 +325,24 @@ export function Orders() {
       // Check if order already exists (to avoid duplicate inventory updates)
       const { data: existingOrder } = await supabase
         .from('orders')
-        .select('tracking_number')
+        .select('tracking_number, courier_fee, order_status')
         .eq('tracking_number', order.tracking_number)
         .single();
     
       // If this is a new order, update inventory
       const isNewOrder = !existingOrder;
+
+      // If order exists and the status has changed to "delivered", update the courier fee
+      if (existingOrder && 
+          existingOrder.order_status !== 'delivered' && 
+          order.order_status === 'delivered') {
+        console.log(`Order status changed to delivered. Updating courier fee to ${courierFee}`);
+      }
+
+      // If existing order has 0 courier fee but we now have a valid fee, use our calculated value
+      if (existingOrder && existingOrder.courier_fee === 0 && courierFee > 0) {
+        console.log(`Updating zero courier fee for existing order to ${courierFee}`);
+      }
 
       const { error } = await supabase.from('orders').upsert([order], {
         onConflict: 'tracking_number'
@@ -575,12 +600,8 @@ export function Orders() {
   // Handle date selection
   const handleDateSelect = (range: DateRange | undefined) => {
     setDate(range);
-    setUseCustomDateRange(true);
-    
-    // If a single date was selected, or the range selection is complete
-    if ((range?.from && !range?.to) || (range?.from && range?.to)) {
-      fetchOrders();
-    }
+    // Enable custom range whenever a start date exists; let useEffect fetch
+    setUseCustomDateRange(!!range?.from);
   };
 
   // Clear date selection
@@ -869,11 +890,14 @@ export function Orders() {
   const handleCheckOrderStatuses = async () => {
     setIsCheckingStatuses(true);
     try {
+      // Only check and update orders that are not delivered/returned
       await checkAndUpdateOrderStatuses();
+
       toast({
         title: "Success",
-        description: "Order statuses and fees checked and updated",
+        description: "Order statuses checked and updated",
       });
+      
       // Refresh orders list to show the updates
       fetchOrders();
     } catch (error) {
@@ -887,20 +911,65 @@ export function Orders() {
     }
   };
 
+  // Replace the old returned-only updater with a unified updater
+  const updateCourierFeeFromAPI = async (trackingNumber: string) => {
+    try {
+      const orderData = await fetchOrderDetails(trackingNumber);
+      if (!orderData || orderData.statusCode !== "200") {
+        console.error("Failed to fetch updated order details for courier fee calculation");
+        return false;
+      }
+
+      const { dist } = orderData;
+      const status = (dist.transactionStatus || "").toLowerCase();
+
+      const transactionFee = dist.transactionFee || 0;
+      const transactionTax = dist.transactionTax || 0;
+      const reversalFee = dist.reversalFee || 0;
+      const reversalTax = dist.reversalTax || 0;
+
+      let courierFee = 0;
+      if (status === "returned") {
+        courierFee = reversalFee + reversalTax;
+      } else if (status === "delivered") {
+        courierFee = transactionFee + transactionTax;
+      } else {
+        // Only update fee for delivered/returned
+        return false;
+      }
+
+      const { error } = await supabase
+        .from('orders')
+        .update({ courier_fee: courierFee })
+        .eq('tracking_number', trackingNumber);
+
+      if (error) {
+        console.error('Error updating courier fee:', error);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.error('Error updating courier fee from API:', error);
+      return false;
+    }
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold">Orders Management</h2>
           <p className="text-muted-foreground">Track and manage parcel operations</p>
         </div>
-        <div className="flex items-center gap-4">
-          {/* Add the Check Status button here */}
+
+        {/* Controls: stack on mobile, row on md+ */}
+        <div className="w-full md:w-auto flex flex-col md:flex-row gap-2 md:gap-4">
+          {/* Check Status */}
           <Button
             onClick={handleCheckOrderStatuses}
             disabled={isCheckingStatuses}
             variant="outline"
-            className="mr-2"
+            className="w-full md:w-auto md:mr-2 justify-start md:justify-center text-left"
           >
             {isCheckingStatuses ? (
               <>
@@ -933,15 +1002,15 @@ export function Orders() {
               </>
             )}
           </Button>
-          
-          {/* Search bar for Order ID */}
-          <div className="relative">
+
+          {/* Search by Order ID */}
+          <div className="relative w-full md:w-[200px]">
             <Input
               type="text"
               placeholder="Search by Order ID"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-[200px]"
+              className="w-full"
             />
             {searchQuery && (
               <Button
@@ -958,12 +1027,13 @@ export function Orders() {
             )}
           </div>
 
+          {/* Select date or range */}
           <Popover>
             <PopoverTrigger asChild>
               <Button
                 variant={"outline"}
                 className={cn(
-                  "w-[280px] justify-start text-left font-normal",
+                  "justify-start text-left font-normal w-full md:w-[280px]",
                   !date && "text-muted-foreground"
                 )}
               >
@@ -997,10 +1067,11 @@ export function Orders() {
               </div>
             </PopoverContent>
           </Popover>
-          
+
+          {/* Month selection (only when not using custom date range) */}
           {!useCustomDateRange && (
             <Select value={selectedMonth} onValueChange={setSelectedMonth}>
-              <SelectTrigger className="w-48">
+              <SelectTrigger className="w-full md:w-48">
                 <SelectValue placeholder="Select month" />
               </SelectTrigger>
               <SelectContent>

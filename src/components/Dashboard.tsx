@@ -232,11 +232,11 @@ export function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <h2 className="text-2xl font-bold">Dashboard Overview</h2>
-        <div className="flex gap-4 items-center">
+        <div className="flex gap-3 items-center w-full md:w-auto md:justify-end flex-nowrap">
           {/* Sales Tax Input */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <div className="flex items-center">
               <span className="text-sm font-medium mr-2">Sales Tax </span>
               {isLoadingSalesTax ? (
@@ -278,7 +278,7 @@ export function Dashboard() {
 
           {/* Month Selection */}
           <Select value={selectedMonth} onValueChange={setSelectedMonth}>
-            <SelectTrigger className="w-48">
+            <SelectTrigger className="w-40 sm:w-48">
               <SelectValue placeholder="Select month" />
             </SelectTrigger>
             <SelectContent>
