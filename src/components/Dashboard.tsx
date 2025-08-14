@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
 import { TrendingUp, TrendingDown, Package, RefreshCw, ShoppingCart, AlertCircle, Truck, Package2, Pencil, Save } from "lucide-react";
-import { parseProductDescriptions } from "@/components/Orders"; // Import the helper function
+import { parseProductDescriptions, findMatchingProduct } from "@/components/Orders";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -151,12 +151,6 @@ export function Dashboard() {
       .select('*');
 
     if (orders && adCosts && packagingCosts && inventoryData) {
-      // Create a map of product names to COGS values
-      const cogsMap: Record<string, number> = {};
-      inventoryData.forEach(product => {
-        cogsMap[product.name.toLowerCase()] = product.cogs;
-      });
-
       // Process orders and calculate statistics
       const totalDispatched = orders.length;
       const totalDelivered = orders.filter(order => order.order_status === 'delivered').length;
@@ -178,32 +172,22 @@ export function Dashboard() {
       // Calculate sales tax
       const totalSalesTax = (salesTax / 100) * totalRevenue;
       
-      // UPDATED: Calculate COGS only for delivered orders
+      // Calculate COGS only for delivered orders using the EXACT same function as Orders component
       const deliveredOrders = orders.filter(order => order.order_status === 'delivered');
       let totalCOGS = 0;
       
+      // Process delivered orders to calculate COGS - using the same logic as Orders component
       deliveredOrders.forEach(order => {
         if (!order.product_name) return;
         
         const parsedProducts = parseProductDescriptions(order.product_name);
         
-        parsedProducts.forEach(({ product, quantity }) => {
-          const productNameLower = product.toLowerCase();
-          // Try to find an exact match first
-          let productCOGS = cogsMap[productNameLower];
+        parsedProducts.forEach(({ product, variant, quantity, fullProductName }) => {
+          // Use the exact same matching function from Orders component
+          const matchingProduct = findMatchingProduct(inventoryData, product, variant, fullProductName);
           
-          // If no exact match, try to find a partial match
-          if (productCOGS === undefined) {
-            const matchingProduct = Object.keys(cogsMap).find(key => 
-              productNameLower.includes(key) || key.includes(productNameLower)
-            );
-            if (matchingProduct) {
-              productCOGS = cogsMap[matchingProduct];
-            }
-          }
-          
-          if (productCOGS !== undefined) {
-            totalCOGS += productCOGS * quantity;
+          if (matchingProduct && typeof matchingProduct.cogs === 'number') {
+            totalCOGS += matchingProduct.cogs * quantity;
           }
         });
       });

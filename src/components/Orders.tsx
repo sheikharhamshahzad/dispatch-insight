@@ -15,6 +15,7 @@ import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { DateRange } from "react-day-picker";
 import { checkAndUpdateOrderStatuses } from "@/services/orderStatusChecker";
+import { fetchOrderDetails, POSTEX_API_CONFIG } from "@/services/postexApiService"; // Updated to import POSTEX_API_CONFIG
 
 // Import PDF.js
 import * as pdfjs from 'pdfjs-dist';
@@ -52,11 +53,6 @@ interface PostExResponse {
     orderDeliveryDate: string;
     transactionTax: number;
     transactionFee: number;
-    trackingNumber: string;
-    transactionDate: string;
-    upfrontPayment: number;
-    merchantName: string;
-    transactionStatus: string;
     reversalTax: number;
     reversalFee: number;
     cityName: string;
@@ -84,32 +80,198 @@ interface ProductTotals {
     variants: {
       [variant: string]: number;
     };
+    baseName?: string; // Base product name without variant
   };
 }
 
-// Move the function outside of the Orders.tsx file and export it
-export const parseProductDescriptions = (description: string): { product: string, variant: string, quantity: number }[] => {
-  const products: { product: string, variant: string, quantity: number }[] = [];
+// Parse product descriptions function (already at top level)
+export const parseProductDescriptions = (description: string): { 
+  product: string, 
+  variant: string, 
+  quantity: number,
+  fullProductName: string 
+}[] => {
+  const products: { product: string, variant: string, quantity: number, fullProductName: string }[] = [];
   
-  // This improved regex handles both parentheses variants and dash-separated variants
-  const regex = /(\d+)\s*x\s*([\w\s™™™\-]+?)(?:\s*\(([^)]+)\)|\s*-\s*([^-\[\]]+?)\s*-|\s*\]|$)/g;
-  let match;
+  // First try to match products in brackets [quantity x product - variant]
+  const productBlocks = description.match(/\[\s*([^\[\]]+?)\s*\]/g);
   
-  while ((match = regex.exec(description)) !== null) {
-    const quantity = parseInt(match[1], 10);
-    let product = match[2].trim();
-    // Get variant from either parentheses format (match[3]) or dash format (match[4])
-    let variant = match[3] || match[4] || "Default";
+  if (productBlocks && productBlocks.length > 0) {
+    // Process bracketed format
+    for (const block of productBlocks) {
+      // Remove the outer [ ]
+      const productText = block.slice(1, -1).trim();
+      
+      // Basic pattern: quantity x product - variant
+      const match = productText.match(/(\d+)\s*x\s*(.*?)(?:\s*-\s*([^-]*?)(?:\s*-|$)|$)/);
+      
+      if (match) {
+        const quantity = parseInt(match[1], 10);
+        let productName = match[2].trim();
+        let variant = match[3] ? match[3].trim() : "Default";
+        
+        // If variant is empty or just spaces, set to Default
+        if (!variant || variant === "") {
+          variant = "Default";
+        }
+        
+        // Store the complete product name for inventory matching
+        const inventoryProductName = `${productName}${variant !== "Default" ? ` - ${variant}` : ""}`;
+        
+        products.push({
+          product: productName,
+          variant: variant,
+          quantity: quantity,
+          fullProductName: inventoryProductName
+        });
+      }
+    }
+  } else {
+    // Try to match plain format: "quantity x product" or similar patterns
+    const plainPatterns = [
+      /(\d+)\s*x\s*(.*?)(?:\s*-\s*([^-]*?)(?:\s*-|$)|$)/i, // "1 x Product - Variant"
+      /(\d+)\s*(?:pcs?|pieces?|units?)\s+(.*?)(?:\s*-\s*([^-]*?)(?:\s*-|$)|$)/i, // "1 pc Product - Variant"
+      /(\d+)\s+(.*?)(?:\s*-\s*([^-]*?)(?:\s*-|$)|$)/i // "1 Product - Variant"
+    ];
     
-    // Standardize product names (remove extra spaces and normalize)
-    product = product.replace(/\s+/g, ' ').trim();
-    // Also trim the variant
-    variant = variant.trim();
+    let matched = false;
     
-    products.push({ product, variant, quantity });
+    for (const pattern of plainPatterns) {
+      const match = description.match(pattern);
+      if (match) {
+        const quantity = parseInt(match[1], 10);
+        let productName = match[2].trim();
+        let variant = match[3] ? match[3].trim() : "Default";
+        
+        if (!variant || variant === "") {
+          variant = "Default";
+        }
+        
+        const inventoryProductName = `${productName}${variant !== "Default" ? ` - ${variant}` : ""}`;
+        
+        products.push({
+          product: productName,
+          variant: variant,
+          quantity: quantity,
+          fullProductName: inventoryProductName
+        });
+        
+        matched = true;
+        break;
+      }
+    }
+    
+    // If no matches found and there's text, add as a single product with quantity 1
+    if (!matched && description.trim()) {
+      products.push({
+        product: description.trim(),
+        variant: "Default",
+        quantity: 1,
+        fullProductName: description.trim()
+      });
+    }
   }
   
   return products;
+};
+
+// Enhanced product matching function - moved outside of Orders component to top level
+export const findMatchingProduct = (
+  inventoryData: any[], 
+  productName: string, 
+  variant: string, 
+  fullProductName: string
+) => {
+  console.log(`Looking for match: "${fullProductName}" (Base: "${productName}", Variant: "${variant}")`);
+
+  const normalize = (s: string) =>
+    s.toLowerCase()
+      .replace(/™|®|©/g, '')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  // 1. Exact full name (case-insensitive)
+  let match = inventoryData?.find(p =>
+    p.name.toLowerCase() === fullProductName.toLowerCase()
+  );
+  if (match) {
+    console.log(`✅ Exact full name match: ${match.name}`);
+    return match;
+  }
+
+  // 2. Normalized full name equality
+  const normalizedFull = normalize(fullProductName);
+  match = inventoryData?.find(p => normalize(p.name) === normalizedFull);
+  if (match) {
+    console.log(`✅ Normalized full name match: ${match.name}`);
+    return match;
+  }
+
+  // 3. Exact base name match
+  match = inventoryData?.find(p =>
+    p.name.toLowerCase() === productName.toLowerCase()
+  );
+  if (match) {
+    console.log(`✅ Base name match: ${match.name}`);
+    return match;
+  }
+
+  // Prepare word tokens (significant words only)
+  const baseNormalized = normalize(productName);
+  const productWords = baseNormalized.split(' ').filter(w => w.length > 2);
+
+  // If only a single significant word, disallow fuzzy / substring / similarity
+  // This prevents generic single tokens from attaching to larger product names.
+  if (productWords.length === 1) {
+    const single = productWords[0];
+
+    // Allow only inventory names that are exactly that single word (normalized)
+    match = inventoryData?.find(p => normalize(p.name) === single);
+    if (match) {
+      console.log(`✅ Exact single-word inventory name match: ${match.name}`);
+      return match;
+    }
+
+    console.log(`❌ Single-word "${single}" has no exact inventory match; skipping fuzzy to avoid false positives`);
+    return null;
+  }
+
+  // From here on we have at least 2 significant words -> allow controlled fuzzy matching.
+
+  // 4. Keyword containment: require at least 2 distinct product words present
+  match = inventoryData?.find(p => {
+    const inv = normalize(p.name);
+    const count = productWords.filter(w => inv.includes(w)).length;
+    return count >= 2;
+  });
+  if (match) {
+    console.log(`✅ Multi-word containment match: ${match.name}`);
+    return match;
+  }
+
+  // 5. Similarity scoring (multi-word)
+  const candidates = inventoryData.map(p => {
+    const invWords = normalize(p.name).split(' ').filter(w => w.length > 2);
+    const matchingWords = productWords.filter(w =>
+      invWords.some(iw => iw === w || iw.includes(w) || w.includes(iw))
+    );
+    const overlapScore = matchingWords.length / productWords.length; // focus on how much of parsed name is covered
+    return { product: p, matchingWords, overlapScore };
+  }).filter(c => c.matchingWords.length >= 2); // need at least 2 overlapping words
+
+  candidates.sort((a, b) => b.overlapScore - a.overlapScore);
+
+  if (candidates.length > 0 && candidates[0].overlapScore >= 0.5) {
+    match = candidates[0].product;
+    console.log(
+      `✅ Similarity match ${(candidates[0].overlapScore * 100).toFixed(1)}%: ${match.name}`
+    );
+    return match;
+  }
+
+  console.log(`❌ No match found for: ${fullProductName}`);
+  return null;
 };
 
 export function Orders() {
@@ -238,36 +400,6 @@ export function Orders() {
     return matches.map(match => match[1]);
   };
 
-  // Fetch order details from PostEx API
-  const fetchOrderDetails = async (trackingNumber: string): Promise<PostExResponse | null> => {
-    try {
-      console.log(`Fetching details for tracking number: ${trackingNumber}`);
-      
-      const response = await fetch(`https://api.postex.pk/services/integration/api/order/v1/track-order/${trackingNumber}`, {
-        method: 'GET',
-        headers: {
-          'token': 'OTMxNzA0NTRhN2E3NGQ4MzkxMDE3YjdmYjEwNzZkM2U6NDYyNGZlMTZhNGRhNDY0NTg4YzhmZDc5OWVkYjEyMDI=',
-          'Accept': 'application/json'
-        }
-      });
-      
-      // Log response status for debugging
-      console.log(`Response status for ${trackingNumber}: ${response.status}`);
-      
-      if (!response.ok) {
-        // Try to get more details about the error
-        const errorText = await response.text();
-        console.log(`Error details: ${errorText}`);
-        throw new Error(`API Error: ${response.status}. Details: ${errorText}`);
-      }
-      
-      return await response.json();
-    } catch (error) {
-      console.error(`Error fetching data for tracking number ${trackingNumber}:`, error);
-      return null;
-    }
-  };
-
   // Save order to Supabase
   const saveOrderToSupabase = async (orderData: PostExResponse): Promise<boolean> => {
     try {
@@ -307,6 +439,10 @@ export function Orders() {
         console.warn(`Warning: Zero courier fee for delivered order ${dist.trackingNumber}. API may not have provided fee data.`);
       }
       
+      // Create today's date for new orders in YYYY-MM-DD format
+      const today = new Date();
+      const dispatchDate = format(today, 'yyyy-MM-dd');
+      
       const order = {
         tracking_number: dist.trackingNumber,
         order_id: dist.orderRefNumber,
@@ -317,7 +453,7 @@ export function Orders() {
         product_name: dist.orderDetail,
         amount: dist.invoicePayment,
         order_status: dist.transactionStatus.toLowerCase(),
-        dispatch_date: dist.transactionDate,
+        dispatch_date: dist.transactionDate || dispatchDate, // Use provided date or today
         courier_fee: courierFee,
         return_received: false // Default value for new orders
       };
@@ -418,6 +554,8 @@ export function Orders() {
       if (type === 'dispatch') {
         // For dispatch: Fetch order details and save to database
         for (const trackingNumber of allTrackingNumbers) {
+          // We're creating new orders, so we know they'll use the new token
+          // No need to pass a dispatch date
           const orderData = await fetchOrderDetails(trackingNumber);
           
           if (orderData && orderData.statusCode === "200") {
@@ -624,21 +762,25 @@ export function Orders() {
       
       const parsedProducts = parseProductDescriptions(order.product_name);
       
-      parsedProducts.forEach(({ product, variant, quantity }) => {
-        if (!totals[product]) {
-          totals[product] = {
+      parsedProducts.forEach(({ product, variant, quantity, fullProductName }) => {
+        // Use the full product name (with variant) as the key
+        const productKey = fullProductName;
+        
+        if (!totals[productKey]) {
+          totals[productKey] = {
             total: 0,
-            variants: {}
+            variants: {},
+            baseName: product // Store base product name
           };
         }
         
-        totals[product].total += quantity;
+        totals[productKey].total += quantity;
         
-        // Track variant counts
-        if (!totals[product].variants[variant]) {
-          totals[product].variants[variant] = 0;
+        // Track variant breakdown
+        if (!totals[productKey].variants[variant]) {
+          totals[productKey].variants[variant] = 0;
         }
-        totals[product].variants[variant] += quantity;
+        totals[productKey].variants[variant] += quantity;
       });
     });
     
@@ -725,8 +867,14 @@ export function Orders() {
 
   // Add this function to calculate COGS and courier statistics
   const calculateCOGSAndCourierStats = async () => {
-    // Fetch product COGS data
-    const cogsMap = await fetchProductsCOGS();
+    const { data: inventoryData, error } = await supabase
+      .from('products')
+      .select('*');
+      
+    if (error) {
+      console.error('Error fetching inventory data:', error);
+      return;
+    }
     
     let totalCOGS = 0;
     let productCOGSBreakdown: Record<string, number> = {};
@@ -739,38 +887,40 @@ export function Orders() {
     deliveredOrders.forEach(order => {
       if (!order.product_name) return;
       
+      console.log(`\nProcessing order ${order.order_id}:`, order.product_name);
       const parsedProducts = parseProductDescriptions(order.product_name);
+      console.log('Parsed products:', parsedProducts);
       
-      parsedProducts.forEach(({ product, variant, quantity }) => {
-        const productNameLower = product.toLowerCase();
-        // Try to find an exact match first
-        let productCOGS = cogsMap[productNameLower];
+      parsedProducts.forEach(({ product, variant, quantity, fullProductName }) => {
+        // Use the enhanced product matching function
+        const matchingProduct = findMatchingProduct(inventoryData, product, variant, fullProductName);
         
-        // If no exact match, try to find a partial match
-        if (productCOGS === undefined) {
-          const matchingProduct = Object.keys(cogsMap).find(key => 
-            productNameLower.includes(key) || key.includes(productNameLower)
-          );
-          if (matchingProduct) {
-            productCOGS = cogsMap[matchingProduct];
-          }
-        }
-        
-        if (productCOGS !== undefined) {
+        if (matchingProduct && typeof matchingProduct.cogs === 'number') {
+          const productCOGS = matchingProduct.cogs;
           const productTotalCOGS = productCOGS * quantity;
           totalCOGS += productTotalCOGS;
           
-          // Track product-specific COGS
-          if (!productCOGSBreakdown[product]) {
-            productCOGSBreakdown[product] = 0;
-          }
-          productCOGSBreakdown[product] += productTotalCOGS;
+          // Use the inventory product name for the breakdown to ensure consistency
+          const breakdownKey = matchingProduct.name;
           
-          // Log for debugging
-          console.log(`Product: ${product}, Quantity: ${quantity}, COGS: ${productTotalCOGS}`);
+          // Track product-specific COGS
+          if (!productCOGSBreakdown[breakdownKey]) {
+            productCOGSBreakdown[breakdownKey] = 0;
+          }
+          productCOGSBreakdown[breakdownKey] += productTotalCOGS;
+          
+          console.log(`✓ Added to COGS - ${matchingProduct.name}: ${quantity} x ${productCOGS} = ${productTotalCOGS}`);
+          console.log(`  Running total for this product: ${productCOGSBreakdown[breakdownKey]}`);
+        } else {
+          console.warn(`❌ No matching product or COGS found for: ${fullProductName}`);
+          // For products not found in inventory, we still want to show them in totals
+          // but they won't contribute to COGS calculations
         }
       });
     });
+    
+    console.log('\nFinal COGS Breakdown:', productCOGSBreakdown);
+    console.log('Total COGS:', totalCOGS);
     
     // Calculate courier statistics for delivered and returned orders
     const deliveredAndReturnedOrders = [...deliveredOrders, ...returnedOrders];
@@ -799,8 +949,8 @@ export function Orders() {
 
   // Add these new functions to your Orders.tsx file
 
-  // Function to update inventory based on product name and quantity
-  const updateInventory = async (productName: string, quantityChange: number) => {
+  // Function to update inventory based on product name and variant
+  const updateInventory = async (product: { product: string, variant: string, quantity: number, fullProductName: string }, quantityChange: number) => {
     try {
       // Fetch inventory data to find matching product
       const { data: inventoryData, error: fetchError } = await supabase
@@ -812,23 +962,19 @@ export function Orders() {
         return false;
       }
       
-      // Find the matching product in inventory
-      const productNameLower = productName.toLowerCase();
-      let matchingProduct = inventoryData?.find(product => 
-        product.name.toLowerCase() === productNameLower
+      // Use the enhanced product matching function
+      const matchingProduct = findMatchingProduct(
+        inventoryData, 
+        product.product, 
+        product.variant, 
+        product.fullProductName
       );
-      
-      // If no exact match, try to find a partial match
-      if (!matchingProduct) {
-        matchingProduct = inventoryData?.find(product => 
-          productNameLower.includes(product.name.toLowerCase()) || 
-          product.name.toLowerCase().includes(productNameLower)
-        );
-      }
       
       if (matchingProduct) {
         // Calculate new stock level and ensure it doesn't go below 0
         const newStock = Math.max(0, matchingProduct.current_stock + quantityChange);
+        
+        console.log(`Updating inventory for ${matchingProduct.name}: ${matchingProduct.current_stock} → ${newStock}`);
         
         // Update the inventory
         const { error: updateError } = await supabase
@@ -842,9 +988,10 @@ export function Orders() {
         }
         
         return true;
+      } else {
+        console.warn(`No matching product found in inventory for: ${product.fullProductName}`);
+        return false;
       }
-      
-      return false;
     } catch (error) {
       console.error('Error updating inventory:', error);
       return false;
@@ -859,14 +1006,18 @@ export function Orders() {
     if (!productDescription) return;
     
     const parsedProducts = parseProductDescriptions(productDescription);
-    const updateResults: {product: string, success: boolean}[] = [];
+    const updateResults: {product: string, variant: string, success: boolean}[] = [];
     
-    for (const { product, quantity } of parsedProducts) {
+    for (const product of parsedProducts) {
       const success = await updateInventory(
-        product, 
-        quantity * quantityMultiplier
+        product,
+        product.quantity * quantityMultiplier
       );
-      updateResults.push({ product, success });
+      updateResults.push({ 
+        product: product.product, 
+        variant: product.variant,
+        success 
+      });
     }
     
     return updateResults;
@@ -878,7 +1029,7 @@ export function Orders() {
       // Create a custom event to trigger inventory refresh on the Inventory component
       const event = new CustomEvent('inventory-updated');
       window.dispatchEvent(event);
-      
+    
       return true;
     } catch (error) {
       console.error('Error triggering inventory refresh:', error);
@@ -890,66 +1041,103 @@ export function Orders() {
   const handleCheckOrderStatuses = async () => {
     setIsCheckingStatuses(true);
     try {
-      // Only check and update orders that are not delivered/returned
-      await checkAndUpdateOrderStatuses();
+      toast({ title: "Processing", description: "Checking order statuses..." });
 
-      toast({
-        title: "Success",
-        description: "Order statuses checked and updated",
+      const { data: pendingOrders, error } = await supabase
+        .from('orders')
+        .select('tracking_number, order_status, dispatch_date')
+        .not('order_status', 'in', '(delivered,returned)');
+
+      if (error) throw new Error('Failed to fetch pending orders');
+
+      const norm = (d?: string) => (d ? d.slice(0,10) : "");
+
+      const oldOrdersGroup = (pendingOrders || []).filter(o => {
+        const nd = norm(o.dispatch_date);
+        return nd !== "" && nd <= POSTEX_API_CONFIG.CUTOFF_DATE;
       });
-      
-      // Refresh orders list to show the updates
+
+      const newOrdersGroup = (pendingOrders || []).filter(o => {
+        const nd = norm(o.dispatch_date);
+        return nd !== "" && nd >= POSTEX_API_CONFIG.NEW_START_DATE;
+      });
+
+      console.log(`Pending: ${pendingOrders?.length || 0}`);
+      console.log(`Old token group: ${oldOrdersGroup.length}`);
+      console.log(`New token group: ${newOrdersGroup.length}`);
+
+      let updated = 0;
+
+      const processGroup = async (group: any[], label: string) => {
+        console.log(`Processing ${group.length} with ${label} token`);
+        for (const order of group) {
+          const orderData = await fetchOrderDetails(order.tracking_number, norm(order.dispatch_date));
+          if (orderData?.statusCode === "200") {
+            const newStatus = orderData.dist.transactionStatus.toLowerCase();
+            if (newStatus !== order.order_status) {
+              await updateOrderStatus(order.tracking_number, orderData);
+              updated++;
+            }
+          }
+          await new Promise(r => setTimeout(r, 300));
+        }
+      };
+
+      await processGroup(oldOrdersGroup, "OLD");
+      await processGroup(newOrdersGroup, "NEW");
+
+      toast({ title: "Done", description: `Updated ${updated} orders.` });
       fetchOrders();
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to check order statuses",
-        variant: "destructive",
-      });
+    } catch (e) {
+      console.error(e);
+      toast({ title: "Error", description: "Status check failed", variant: "destructive" });
     } finally {
       setIsCheckingStatuses(false);
     }
   };
 
-  // Replace the old returned-only updater with a unified updater
-  const updateCourierFeeFromAPI = async (trackingNumber: string) => {
+  // Add this helper function to update an order's status and courier fee
+  const updateOrderStatus = async (trackingNumber: string, orderData: any): Promise<boolean> => {
     try {
-      const orderData = await fetchOrderDetails(trackingNumber);
-      if (!orderData || orderData.statusCode !== "200") {
-        console.error("Failed to fetch updated order details for courier fee calculation");
-        return false;
-      }
-
       const { dist } = orderData;
-      const status = (dist.transactionStatus || "").toLowerCase();
-
-      const transactionFee = dist.transactionFee || 0;
-      const transactionTax = dist.transactionTax || 0;
-      const reversalFee = dist.reversalFee || 0;
-      const reversalTax = dist.reversalTax || 0;
-
+      const newStatus = dist.transactionStatus.toLowerCase();
+      
+      // Different fee calculation based on status
       let courierFee = 0;
-      if (status === "returned") {
-        courierFee = reversalFee + reversalTax;
-      } else if (status === "delivered") {
-        courierFee = transactionFee + transactionTax;
-      } else {
-        // Only update fee for delivered/returned
-        return false;
+      
+      if (newStatus === "returned") {
+        // For returned orders, use reversalFee + reversalTax
+        courierFee = (dist.reversalFee || 0) + (dist.reversalTax || 0);
+      } else if (newStatus === "delivered") {
+        // For delivered orders, use transactionFee + transactionTax
+        courierFee = (dist.transactionFee || 0) + (dist.transactionTax || 0);
       }
-
+      
+      // Update database with new status and courier fee (for delivered/returned)
+      const updateData: any = { order_status: newStatus };
+      
+      // Only update courier fee for final statuses
+      if (newStatus === "delivered" || newStatus === "returned") {
+        updateData.courier_fee = courierFee;
+      }
+      
       const { error } = await supabase
         .from('orders')
-        .update({ courier_fee: courierFee })
+        .update(updateData)
         .eq('tracking_number', trackingNumber);
-
+      
       if (error) {
-        console.error('Error updating courier fee:', error);
+        console.error(`Error updating order ${trackingNumber}:`, error);
         return false;
       }
+      
+      console.log(`✅ Updated order ${trackingNumber}: status → ${newStatus}${
+        updateData.courier_fee !== undefined ? `, courier fee: ${updateData.courier_fee}` : ''
+      }`);
+      
       return true;
     } catch (error) {
-      console.error('Error updating courier fee from API:', error);
+      console.error(`Error processing update for ${trackingNumber}:`, error);
       return false;
     }
   };
@@ -1143,26 +1331,14 @@ export function Orders() {
                   {Object.entries(productTotals).map(([product, data], index) => (
                     <div 
                       key={index} 
-                      className="flex justify-between items-center p-3 border rounded-md bg-muted/30 group relative"
+                      className="flex justify-between items-center p-3 border rounded-md bg-muted/30"
                     >
-                      <span className="text-sm font-medium truncate max-w-[70%]" title={product}>
+                      <span className="text-sm font-medium mr-2 break-words" style={{ wordBreak: 'break-word', maxWidth: '75%' }} title={product}>
                         {product}
                       </span>
-                      <Badge variant="secondary" className="ml-2">
+                      <Badge variant="secondary" className="ml-auto shrink-0">
                         {data.total} units
                       </Badge>
-
-                      {/* Tooltip for variant breakdown */}
-                      <div className="absolute left-0 bottom-full mb-2 bg-black text-white p-2 rounded-md text-xs hidden group-hover:block z-10 min-w-[150px] shadow-lg">
-                        <div className="font-semibold mb-1 pb-1 border-b border-gray-700">Variant Breakdown:</div>
-                        {Object.entries(data.variants).map(([variant, count], i) => (
-                          <div key={i} className="flex justify-between py-0.5">
-                            <span>{variant}:</span>
-                            <span className="font-medium ml-2">{count} × </span>
-                          </div>
-                        ))}
-                        <div className="absolute left-4 bottom-[-6px] w-3 h-3 bg-black transform rotate-45"></div>
-                      </div>
                     </div>
                   ))}
                 </div>
@@ -1238,12 +1414,14 @@ export function Orders() {
             <div className="mt-4 pt-4 border-t">
               <h4 className="text-sm font-medium mb-2">COGS Breakdown by Product</h4>
               <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 md:grid-cols-3">
-                {Object.entries(cogsStats.productCOGSBreakdown).map(([product, cogs]) => (
-                  <div key={product} className="flex justify-between p-2 border rounded text-sm">
-                    <span className="truncate max-w-[70%]" title={product}>{product}</span>
-                    <span className="font-medium">PKR {cogs.toLocaleString()}</span>
-                  </div>
-                ))}
+                {Object.entries(cogsStats.productCOGSBreakdown)
+                  .sort(([, a], [, b]) => b - a) // Sort by COGS value (highest first)
+                  .map(([product, cogs]) => (
+                    <div key={product} className="flex justify-between p-2 border rounded text-sm">
+                      <span className="truncate max-w-[70%]" title={product}>{product}</span>
+                      <span className="font-medium">PKR {cogs.toLocaleString()}</span>
+                    </div>
+                  ))}
               </div>
             </div>
           )}

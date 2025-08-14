@@ -1,4 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
+import { fetchOrderDetails, POSTEX_API_CONFIG } from "./postexApiService";
 
 interface PostExStatusResponse {
   statusCode: string;
@@ -44,31 +45,6 @@ const FINAL_STATUSES = ['delivered', 'returned'];
 
 // Track the checker's running state
 let isCheckerRunning = false;
-
-/**
- * Fetch order details from PostEx API
- */
-const fetchOrderStatus = async (trackingNumber: string): Promise<PostExStatusResponse | null> => {
-  try {
-    const response = await fetch(`https://api.postex.pk/services/integration/api/order/v1/track-order/${trackingNumber}`, {
-      method: 'GET',
-      headers: {
-        'token': 'OTMxNzA0NTRhN2E3NGQ4MzkxMDE3YjdmYjEwNzZkM2U6NDYyNGZlMTZhNGRhNDY0NTg4YzhmZDc5OWVkYjEyMDI=',
-        'Accept': 'application/json'
-      }
-    });
-    
-    if (!response.ok) {
-      console.error(`Error fetching status for ${trackingNumber}: ${response.status}`);
-      return null;
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error(`Exception fetching status for ${trackingNumber}:`, error);
-    return null;
-  }
-};
 
 /**
  * Update order status and courier fee in the database
@@ -118,7 +94,7 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
     // Get all non-final status orders
     const { data: pendingOrders, error } = await supabase
       .from('orders')
-      .select('tracking_number, order_status')
+      .select('tracking_number, order_status, dispatch_date')
       .not('order_status', 'in', `(${FINAL_STATUSES.join(',')})`);
     
     if (error) {
@@ -129,76 +105,36 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
     console.log(`Found ${pendingOrders?.length || 0} orders to check`);
     
     // Process each order
+    const normalize = (d?: string) => (d ? d.slice(0,10) : "");
     let updatedCount = 0;
+
     for (const order of (pendingOrders || [])) {
-      const orderData = await fetchOrderStatus(order.tracking_number);
-      
-      if (orderData && orderData.statusCode === "200") {
+      const normalizedDate = normalize(order.dispatch_date);
+      const tokenType = normalizedDate && normalizedDate <= POSTEX_API_CONFIG.CUTOFF_DATE ? 'OLD' : 'NEW';
+      const orderData = await fetchOrderDetails(order.tracking_number, normalizedDate);
+
+      if (orderData?.statusCode === "200") {
         const { dist } = orderData;
-        
-        // Get new status
         const newStatus = dist.transactionStatus.toLowerCase();
-        
-        // Only proceed if status changed
         if (newStatus !== order.order_status) {
-          // Different update logic based on new status
+          let courierFeeUpdate: number | undefined;
           if (newStatus === 'delivered') {
-            // For delivered orders, update status and courier fee using transactionFee + transactionTax
-            const transactionFee = dist.transactionFee || 0;
-            const transactionTax = dist.transactionTax || 0;
-            const courierFee = transactionFee + transactionTax;
-            
-            await supabase
-              .from('orders')
-              .update({ 
-                order_status: newStatus,
-                courier_fee: courierFee
-              })
-              .eq('tracking_number', order.tracking_number);
-              
-            console.log(
-              `Updated order ${order.tracking_number}: ` +
-              `status ${order.order_status} → ${newStatus}, ` +
-              `courier fee: ${courierFee}`
-            );
+            courierFeeUpdate = (dist.transactionFee || 0) + (dist.transactionTax || 0);
           } else if (newStatus === 'returned') {
-            // For returned orders, update status and courier fee using reversalFee + reversalTax
-            const reversalFee = dist.reversalFee || 0;
-            const reversalTax = dist.reversalTax || 0;
-            const courierFee = reversalFee + reversalTax;
-            
-            await supabase
-              .from('orders')
-              .update({ 
-                order_status: newStatus,
-                courier_fee: courierFee
-              })
-              .eq('tracking_number', order.tracking_number);
-              
-            console.log(
-              `Updated order ${order.tracking_number}: ` +
-              `status ${order.order_status} → ${newStatus}, ` +
-              `courier fee: ${courierFee}`
-            );
-          } else {
-            // For other status updates, just update the status without changing the courier fee
-            await supabase
-              .from('orders')
-              .update({ order_status: newStatus })
-              .eq('tracking_number', order.tracking_number);
-              
-            console.log(
-              `Updated order ${order.tracking_number}: ` +
-              `status ${order.order_status} → ${newStatus}`
-            );
+            courierFeeUpdate = (dist.reversalFee || 0) + (dist.reversalTax || 0);
           }
-          
+          const updateObj: any = { order_status: newStatus };
+          if (courierFeeUpdate !== undefined) updateObj.courier_fee = courierFeeUpdate;
+
+          await supabase.from('orders')
+            .update(updateObj)
+            .eq('tracking_number', order.tracking_number);
+
+          console.log(`[${tokenType}] ${order.tracking_number} → ${newStatus}${courierFeeUpdate !== undefined ? ` (fee ${courierFeeUpdate})` : ''}`);
           updatedCount++;
         }
       }
-      
-      // Add small delay between API calls to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(r => setTimeout(r, 500));
     }
     
     console.log(`Completed order status check. Updated ${updatedCount} orders.`);
