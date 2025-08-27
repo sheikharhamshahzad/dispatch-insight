@@ -15,7 +15,9 @@ import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { DateRange } from "react-day-picker";
 import { checkAndUpdateOrderStatuses } from "@/services/orderStatusChecker";
-import { fetchOrderDetails, POSTEX_API_CONFIG } from "@/services/postexApiService"; // Updated to import POSTEX_API_CONFIG
+import { fetchOrderDetails, POSTEX_API_CONFIG } from "@/services/postexApiService";
+import { FIFOInventoryService } from "@/services/fifoInventoryService";
+import { parseProductDescriptions, findMatchingProduct } from "@/services/productMatchingService";
 
 // Import PDF.js
 import * as pdfjs from 'pdfjs-dist';
@@ -37,6 +39,7 @@ interface Order {
   return_received: boolean;
   courier_fee: number;
   customer_city: string;
+  cogs_allocated: boolean;
 }
 
 interface PostExResponse {
@@ -83,196 +86,6 @@ interface ProductTotals {
     baseName?: string; // Base product name without variant
   };
 }
-
-// Parse product descriptions function (already at top level)
-export const parseProductDescriptions = (description: string): { 
-  product: string, 
-  variant: string, 
-  quantity: number,
-  fullProductName: string 
-}[] => {
-  const products: { product: string, variant: string, quantity: number, fullProductName: string }[] = [];
-  
-  // First try to match products in brackets [quantity x product - variant]
-  const productBlocks = description.match(/\[\s*([^\[\]]+?)\s*\]/g);
-  
-  if (productBlocks && productBlocks.length > 0) {
-    // Process bracketed format
-    for (const block of productBlocks) {
-      // Remove the outer [ ]
-      const productText = block.slice(1, -1).trim();
-      
-      // Basic pattern: quantity x product - variant
-      const match = productText.match(/(\d+)\s*x\s*(.*?)(?:\s*-\s*([^-]*?)(?:\s*-|$)|$)/);
-      
-      if (match) {
-        const quantity = parseInt(match[1], 10);
-        let productName = match[2].trim();
-        let variant = match[3] ? match[3].trim() : "Default";
-        
-        // If variant is empty or just spaces, set to Default
-        if (!variant || variant === "") {
-          variant = "Default";
-        }
-        
-        // Store the complete product name for inventory matching
-        const inventoryProductName = `${productName}${variant !== "Default" ? ` - ${variant}` : ""}`;
-        
-        products.push({
-          product: productName,
-          variant: variant,
-          quantity: quantity,
-          fullProductName: inventoryProductName
-        });
-      }
-    }
-  } else {
-    // Try to match plain format: "quantity x product" or similar patterns
-    const plainPatterns = [
-      /(\d+)\s*x\s*(.*?)(?:\s*-\s*([^-]*?)(?:\s*-|$)|$)/i, // "1 x Product - Variant"
-      /(\d+)\s*(?:pcs?|pieces?|units?)\s+(.*?)(?:\s*-\s*([^-]*?)(?:\s*-|$)|$)/i, // "1 pc Product - Variant"
-      /(\d+)\s+(.*?)(?:\s*-\s*([^-]*?)(?:\s*-|$)|$)/i // "1 Product - Variant"
-    ];
-    
-    let matched = false;
-    
-    for (const pattern of plainPatterns) {
-      const match = description.match(pattern);
-      if (match) {
-        const quantity = parseInt(match[1], 10);
-        let productName = match[2].trim();
-        let variant = match[3] ? match[3].trim() : "Default";
-        
-        if (!variant || variant === "") {
-          variant = "Default";
-        }
-        
-        const inventoryProductName = `${productName}${variant !== "Default" ? ` - ${variant}` : ""}`;
-        
-        products.push({
-          product: productName,
-          variant: variant,
-          quantity: quantity,
-          fullProductName: inventoryProductName
-        });
-        
-        matched = true;
-        break;
-      }
-    }
-    
-    // If no matches found and there's text, add as a single product with quantity 1
-    if (!matched && description.trim()) {
-      products.push({
-        product: description.trim(),
-        variant: "Default",
-        quantity: 1,
-        fullProductName: description.trim()
-      });
-    }
-  }
-  
-  return products;
-};
-
-// Enhanced product matching function - moved outside of Orders component to top level
-export const findMatchingProduct = (
-  inventoryData: any[], 
-  productName: string, 
-  variant: string, 
-  fullProductName: string
-) => {
-  console.log(`Looking for match: "${fullProductName}" (Base: "${productName}", Variant: "${variant}")`);
-
-  const normalize = (s: string) =>
-    s.toLowerCase()
-      .replace(/™|®|©/g, '')
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-  // 1. Exact full name (case-insensitive)
-  let match = inventoryData?.find(p =>
-    p.name.toLowerCase() === fullProductName.toLowerCase()
-  );
-  if (match) {
-    console.log(`✅ Exact full name match: ${match.name}`);
-    return match;
-  }
-
-  // 2. Normalized full name equality
-  const normalizedFull = normalize(fullProductName);
-  match = inventoryData?.find(p => normalize(p.name) === normalizedFull);
-  if (match) {
-    console.log(`✅ Normalized full name match: ${match.name}`);
-    return match;
-  }
-
-  // 3. Exact base name match
-  match = inventoryData?.find(p =>
-    p.name.toLowerCase() === productName.toLowerCase()
-  );
-  if (match) {
-    console.log(`✅ Base name match: ${match.name}`);
-    return match;
-  }
-
-  // Prepare word tokens (significant words only)
-  const baseNormalized = normalize(productName);
-  const productWords = baseNormalized.split(' ').filter(w => w.length > 2);
-
-  // If only a single significant word, disallow fuzzy / substring / similarity
-  // This prevents generic single tokens from attaching to larger product names.
-  if (productWords.length === 1) {
-    const single = productWords[0];
-
-    // Allow only inventory names that are exactly that single word (normalized)
-    match = inventoryData?.find(p => normalize(p.name) === single);
-    if (match) {
-      console.log(`✅ Exact single-word inventory name match: ${match.name}`);
-      return match;
-    }
-
-    console.log(`❌ Single-word "${single}" has no exact inventory match; skipping fuzzy to avoid false positives`);
-    return null;
-  }
-
-  // From here on we have at least 2 significant words -> allow controlled fuzzy matching.
-
-  // 4. Keyword containment: require at least 2 distinct product words present
-  match = inventoryData?.find(p => {
-    const inv = normalize(p.name);
-    const count = productWords.filter(w => inv.includes(w)).length;
-    return count >= 2;
-  });
-  if (match) {
-    console.log(`✅ Multi-word containment match: ${match.name}`);
-    return match;
-  }
-
-  // 5. Similarity scoring (multi-word)
-  const candidates = inventoryData.map(p => {
-    const invWords = normalize(p.name).split(' ').filter(w => w.length > 2);
-    const matchingWords = productWords.filter(w =>
-      invWords.some(iw => iw === w || iw.includes(w) || w.includes(iw))
-    );
-    const overlapScore = matchingWords.length / productWords.length; // focus on how much of parsed name is covered
-    return { product: p, matchingWords, overlapScore };
-  }).filter(c => c.matchingWords.length >= 2); // need at least 2 overlapping words
-
-  candidates.sort((a, b) => b.overlapScore - a.overlapScore);
-
-  if (candidates.length > 0 && candidates[0].overlapScore >= 0.5) {
-    match = candidates[0].product;
-    console.log(
-      `✅ Similarity match ${(candidates[0].overlapScore * 100).toFixed(1)}%: ${match.name}`
-    );
-    return match;
-  }
-
-  console.log(`❌ No match found for: ${fullProductName}`);
-  return null;
-};
 
 export function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
@@ -488,11 +301,23 @@ export function Orders() {
         console.error('Error saving order:', error);
         return false;
       }
+
+      // Get the saved order ID
+      const { data: savedOrder } = await supabase
+        .from('orders')
+        .select('id, cogs_allocated')
+        .eq('tracking_number', order.tracking_number)
+        .single();
+
+      if (!savedOrder) {
+        console.error('Could not fetch saved order');
+        return false;
+      }
       
-      // Only update inventory for new orders to avoid duplicate deductions
-      if (isNewOrder) {
-        // Deduct from inventory (-1 multiplier to reduce stock)
-        await processInventoryUpdates(order.product_name, -1);
+      // Only allocate inventory for new orders and if not already allocated
+      if (isNewOrder && !savedOrder.cogs_allocated) {
+        console.log('Allocating FIFO inventory for new order:', order.tracking_number);
+        await allocateInventoryForOrder(savedOrder.id, order.product_name);
       }
       
       return true;
@@ -616,14 +441,14 @@ export function Orders() {
     if (!orderToDelete) return;
     
     try {
-      // Before deleting, we need to add the items back to inventory if the order was dispatched
-      // but not already returned
-      if (orderToDelete.order_status !== 'returned' && !orderToDelete.return_received) {
-        // Add items back to inventory (with +1 multiplier to increase stock)
-        await processInventoryUpdates(orderToDelete.product_name, 1);
+      // Before deleting, reverse FIFO allocations if the order had them
+      if (orderToDelete.cogs_allocated) {
+        console.log('Reversing FIFO allocations for deleted order:', orderToDelete.order_id);
+        const reverseSuccess = await FIFOInventoryService.reverseAllocation(orderToDelete.id);
         
-        // Optional: Log the inventory update
-        console.log(`Inventory updated for deleted order: ${orderToDelete.order_id}`);
+        if (!reverseSuccess) {
+          console.warn('Failed to reverse FIFO allocations for order:', orderToDelete.order_id);
+        }
       }
       
       const { error } = await supabase
@@ -640,7 +465,7 @@ export function Orders() {
       } else {
         toast({
           title: "Success",
-          description: "Order deleted successfully and inventory updated",
+          description: "Order deleted successfully and inventory restored",
         });
         
         // Refresh inventory display if needed
@@ -865,62 +690,20 @@ export function Orders() {
     return cogsMap;
   };
 
-  // Add this function to calculate COGS and courier statistics
+  // Add this function to calculate COGS and courier statistics using FIFO
   const calculateCOGSAndCourierStats = async () => {
-    const { data: inventoryData, error } = await supabase
-      .from('products')
-      .select('*');
-      
-    if (error) {
-      console.error('Error fetching inventory data:', error);
-      return;
-    }
-    
-    let totalCOGS = 0;
-    let productCOGSBreakdown: Record<string, number> = {};
-    
     // Only consider delivered orders for COGS calculation
     const deliveredOrders = orders.filter(order => order.order_status === 'delivered');
     const returnedOrders = orders.filter(order => order.order_status === 'returned');
     
-    // Process delivered orders to calculate COGS
-    deliveredOrders.forEach(order => {
-      if (!order.product_name) return;
-      
-      console.log(`\nProcessing order ${order.order_id}:`, order.product_name);
-      const parsedProducts = parseProductDescriptions(order.product_name);
-      console.log('Parsed products:', parsedProducts);
-      
-      parsedProducts.forEach(({ product, variant, quantity, fullProductName }) => {
-        // Use the enhanced product matching function
-        const matchingProduct = findMatchingProduct(inventoryData, product, variant, fullProductName);
-        
-        if (matchingProduct && typeof matchingProduct.cogs === 'number') {
-          const productCOGS = matchingProduct.cogs;
-          const productTotalCOGS = productCOGS * quantity;
-          totalCOGS += productTotalCOGS;
-          
-          // Use the inventory product name for the breakdown to ensure consistency
-          const breakdownKey = matchingProduct.name;
-          
-          // Track product-specific COGS
-          if (!productCOGSBreakdown[breakdownKey]) {
-            productCOGSBreakdown[breakdownKey] = 0;
-          }
-          productCOGSBreakdown[breakdownKey] += productTotalCOGS;
-          
-          console.log(`✓ Added to COGS - ${matchingProduct.name}: ${quantity} x ${productCOGS} = ${productTotalCOGS}`);
-          console.log(`  Running total for this product: ${productCOGSBreakdown[breakdownKey]}`);
-        } else {
-          console.warn(`❌ No matching product or COGS found for: ${fullProductName}`);
-          // For products not found in inventory, we still want to show them in totals
-          // but they won't contribute to COGS calculations
-        }
-      });
-    });
+    // Get delivered order IDs
+    const deliveredOrderIds = deliveredOrders.map(order => order.id);
     
-    console.log('\nFinal COGS Breakdown:', productCOGSBreakdown);
-    console.log('Total COGS:', totalCOGS);
+    // Use FIFO service to calculate COGS from recorded line items
+    const { totalCOGS, productBreakdown } = await FIFOInventoryService.calculateDeliveredOrdersCOGS(deliveredOrderIds);
+    
+    console.log('FIFO COGS Calculation - Total:', totalCOGS);
+    console.log('FIFO COGS Breakdown:', productBreakdown);
     
     // Calculate courier statistics for delivered and returned orders
     const deliveredAndReturnedOrders = [...deliveredOrders, ...returnedOrders];
@@ -933,7 +716,7 @@ export function Orders() {
       totalCOGS,
       totalCourierFees,
       avgCourierFee,
-      productCOGSBreakdown,
+      productCOGSBreakdown: productBreakdown,
       deliveredAndReturnedCount: deliveredAndReturnedOrders.length,
       deliveredCount: deliveredOrders.length,
       returnedCount: returnedOrders.length
@@ -998,7 +781,63 @@ export function Orders() {
     }
   };
 
-  // Function to process inventory updates for multiple products
+  // FIFO inventory allocation function
+  const allocateInventoryForOrder = async (orderId: string, productDescription: string) => {
+    if (!productDescription) return;
+    
+    console.log('Starting FIFO allocation for order:', orderId, 'products:', productDescription);
+    
+    const parsedProducts = parseProductDescriptions(productDescription);
+    
+    // Fetch inventory data to find matching products
+    const { data: inventoryData, error: fetchError } = await supabase
+      .from('products')
+      .select('*');
+      
+    if (fetchError) {
+      console.error('Error fetching inventory data:', fetchError);
+      return;
+    }
+    
+    let allAllocationsSuccessful = true;
+    
+    for (const { product, variant, quantity, fullProductName } of parsedProducts) {
+      console.log(`Allocating ${quantity} units of ${fullProductName}`);
+      
+      // Find matching product
+      const matchingProduct = findMatchingProduct(inventoryData, product, variant, fullProductName);
+      
+      if (!matchingProduct) {
+        console.warn(`❌ No matching product found for: ${fullProductName}`);
+        allAllocationsSuccessful = false;
+        continue;
+      }
+      
+      // Allocate inventory using FIFO
+      const allocationResult = await FIFOInventoryService.allocateInventoryForOrder(
+        matchingProduct.id,
+        orderId,
+        fullProductName,
+        quantity
+      );
+      
+      if (allocationResult.allocation_success) {
+        console.log(`✅ Successfully allocated ${allocationResult.allocated_quantity} units with total COGS: ${allocationResult.total_cogs}`);
+      } else {
+        console.warn(`❌ Failed to allocate ${quantity} units for ${fullProductName}. Only ${allocationResult.allocated_quantity} units allocated.`);
+        allAllocationsSuccessful = false;
+      }
+    }
+    
+    if (allAllocationsSuccessful) {
+      // Mark order as having COGS allocated
+      await FIFOInventoryService.markOrderCOGSAllocated(orderId);
+    }
+    
+    return allAllocationsSuccessful;
+  };
+
+  // Function to process inventory updates for multiple products (legacy function, kept for compatibility)
   const processInventoryUpdates = async (
     productDescription: string, 
     quantityMultiplier: number // Use 1 for adding to inventory, -1 for removing

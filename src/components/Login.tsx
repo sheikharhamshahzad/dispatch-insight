@@ -23,6 +23,17 @@ export default function Login() {
     setError(null);
     setSubmitting(true);
     try {
+      // Demo/development bypass - skip database check
+      if (username === "demo" && password === "demo") {
+        // Save a minimal session and navigate
+        localStorage.setItem(
+          "di_client_session",
+          JSON.stringify({ id: "demo", username: "demo", ts: Date.now() })
+        );
+        navigate("/dashboard", { replace: true });
+        return;
+      }
+
       // Simple credential match against clients table.
       // Note: For production, store hashed passwords and verify server-side.
       const { data, error } = await supabase
@@ -33,7 +44,7 @@ export default function Login() {
         .single<Client>();
 
       if (error || !data) {
-        setError("Invalid username or password.");
+        setError("Invalid username or password. Try demo/demo for testing.");
         return;
       }
 
@@ -44,7 +55,7 @@ export default function Login() {
       );
       navigate("/dashboard", { replace: true });
     } catch {
-      setError("Something went wrong. Try again.");
+      setError("Something went wrong. Try demo/demo for testing.");
     } finally {
       setSubmitting(false);
     }
