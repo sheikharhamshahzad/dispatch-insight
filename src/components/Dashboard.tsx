@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
 import { TrendingUp, TrendingDown, Package, RefreshCw, ShoppingCart, AlertCircle, Truck, Package2, Pencil, Save } from "lucide-react";
-import { parseProductDescriptions, findMatchingProduct } from "@/components/Orders";
+import { parseProductDescriptions, findMatchingProduct } from "@/services/productMatchingService";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
