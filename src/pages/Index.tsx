@@ -4,9 +4,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Dashboard } from "@/components/Dashboard";
 import { Orders } from "@/components/Orders";
 import { AdCosts } from "@/components/AdCosts";
-import { Packaging } from "@/components/Packaging"; // Import the new component
-import { Inventory } from "@/components/Inventory";
-import { BarChart3, Package, DollarSign, Box, Package2 } from "lucide-react";
+import { Packaging } from "@/components/Packaging";
+import { BatchInventory } from "@/components/BatchInventory";
+import { BarChart3, Package, DollarSign, Box, Package2, Layers } from "lucide-react";
 import { useTabNavigation } from "@/contexts/TabNavigationContext";
 
 const Index = () => {
@@ -23,6 +23,7 @@ const Index = () => {
         </div>
 
         <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)} className="space-y-6">
+          {/* Update grid-cols to 5 (was 6) */}
           <TabsList className="hidden md:grid w-full grid-cols-5">
             <TabsTrigger value="dashboard" className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4" />
@@ -40,30 +41,26 @@ const Index = () => {
               <Package2 className="h-4 w-4" />
               Packaging
             </TabsTrigger>
-            <TabsTrigger value="inventory" className="flex items-center gap-2">
-              <Box className="h-4 w-4" />
-              Inventory
+            <TabsTrigger value="batch-inventory" className="flex items-center gap-2">
+              <Layers className="h-4 w-4" />
+              Batch Inventory
             </TabsTrigger>
           </TabsList>
 
           <TabsContent value="dashboard">
             <Dashboard />
           </TabsContent>
-
           <TabsContent value="orders">
             <Orders />
           </TabsContent>
-
           <TabsContent value="ad-costs">
             <AdCosts />
           </TabsContent>
-          
-          <TabsContent value="packaging"> {/* New tab content */}
+          <TabsContent value="packaging">
             <Packaging />
           </TabsContent>
-
-          <TabsContent value="inventory">
-            <Inventory />
+          <TabsContent value="batch-inventory">
+            <BatchInventory />
           </TabsContent>
         </Tabs>
       </div>

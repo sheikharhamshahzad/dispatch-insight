@@ -27,6 +27,7 @@ export function AdCosts() {
     amount: '',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -34,24 +35,36 @@ export function AdCosts() {
   }, [selectedMonth]);
 
   const fetchAdCosts = async () => {
+    setIsLoading(true);
     const startDate = `${selectedMonth}-01`;
-    const endDate = `${selectedMonth}-31`;
+    
+    // Calculate the last day of the month correctly
+    const year = parseInt(selectedMonth.substring(0, 4));
+    const month = parseInt(selectedMonth.substring(5, 7));
+    const lastDay = new Date(year, month, 0).getDate();
+    const endDate = `${selectedMonth}-${lastDay}`;
 
-    const { data, error } = await supabase
-      .from('ad_costs')
-      .select('*')
-      .gte('date', startDate)
-      .lte('date', endDate)
-      .order('date', { ascending: false });
+    try {
+      const { data, error } = await supabase
+        .from('ad_costs')
+        .select('*')
+        .gte('date', startDate)
+        .lte('date', endDate)
+        .order('date', { ascending: false });
 
-    if (error) {
+      if (error) throw error;
+      
+      // No error throwing when data is empty, just set empty array
+      setAdCosts(data || []);
+    } catch (error) {
+      console.error("Error fetching ad costs:", error);
       toast({
         title: "Error",
         description: "Failed to fetch ad costs",
         variant: "destructive",
       });
-    } else {
-      setAdCosts(data || []);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -97,6 +110,7 @@ export function AdCosts() {
       // Refresh data
       fetchAdCosts();
     } catch (error) {
+      console.error("Error adding ad cost:", error);
       toast({
         title: "Error",
         description: "Failed to add ad cost",
@@ -163,7 +177,7 @@ export function AdCosts() {
         <CardContent>
           <div className="text-2xl font-bold">PKR {totalAdSpend.toLocaleString()}</div>
           <p className="text-xs text-muted-foreground">
-            For {new Date(selectedMonth).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
+            For {new Date(selectedMonth + "-01").toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
           </p>
         </CardContent>
       </Card>
@@ -236,41 +250,48 @@ export function AdCosts() {
       <Card>
         <CardHeader>
           <CardTitle>
-            Ad Costs for {new Date(selectedMonth).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
+            Ad Costs for {new Date(selectedMonth + "-01").toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
           </CardTitle>
           <CardDescription>
             {adCosts.length} entries found
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Platform</TableHead>
-                  <TableHead>Amount</TableHead>
-                  <TableHead>Added On</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {adCosts.map((cost) => (
-                  <TableRow key={cost.id}>
-                    <TableCell>{new Date(cost.date).toLocaleDateString()}</TableCell>
-                    <TableCell>{getPlatformBadge(cost.platform)}</TableCell>
-                    <TableCell className="font-medium">PKR {cost.amount.toLocaleString()}</TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {new Date(cost.created_at).toLocaleDateString()}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-          
-          {adCosts.length === 0 && (
+          {isLoading ? (
             <div className="text-center py-8 text-muted-foreground">
-              No ad costs found for this month
+              Loading ad costs...
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Platform</TableHead>
+                    <TableHead>Amount</TableHead>
+                    <TableHead>Added On</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {adCosts.map((cost) => (
+                    <TableRow key={cost.id}>
+                      <TableCell>{new Date(cost.date).toLocaleDateString()}</TableCell>
+                      <TableCell>{getPlatformBadge(cost.platform)}</TableCell>
+                      <TableCell className="font-medium">PKR {cost.amount.toLocaleString()}</TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {new Date(cost.created_at).toLocaleDateString()}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {adCosts.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={4} className="text-center py-4 text-muted-foreground">
+                        No ad costs found for this month
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
             </div>
           )}
         </CardContent>

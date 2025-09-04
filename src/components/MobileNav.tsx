@@ -6,7 +6,7 @@ import {
   Package,
   DollarSign,
   Package2,
-  Box,
+  Layers,
 } from "lucide-react";
 import { useTabNavigation, type TabKey } from "@/contexts/TabNavigationContext";
 
@@ -21,12 +21,12 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Orders", tab: "orders", icon: Package },
   { label: "Ad Costs", tab: "ad-costs", icon: DollarSign },
   { label: "Packaging", tab: "packaging", icon: Package2 },
-  { label: "Inventory", tab: "inventory", icon: Box },
+  { label: "Batch Inventory", tab: "batch-inventory", icon: Layers },
 ];
 
 export default function MobileNav() {
   const [open, setOpen] = useState(false);
-  const { setActiveTab } = useTabNavigation();
+  const { setActiveTab, activeTab } = useTabNavigation();
 
   useEffect(() => {
     document.body.style.overflow = open ? "hidden" : "";

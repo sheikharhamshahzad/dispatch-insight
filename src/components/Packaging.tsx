@@ -36,6 +36,7 @@ export function Packaging() {
     amount: '',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [costToDelete, setCostToDelete] = useState<PackagingCost | null>(null);
   const { toast } = useToast();
@@ -45,24 +46,33 @@ export function Packaging() {
   }, [selectedMonth]);
 
   const fetchPackagingCosts = async () => {
+    setIsLoading(true);
     const startDate = `${selectedMonth}-01`;
-    const endDate = `${selectedMonth}-31`;
+    
+    // Calculate the correct last day of the month
+    const lastDay = new Date(parseInt(selectedMonth.split('-')[0]), parseInt(selectedMonth.split('-')[1]), 0).getDate();
+    const endDate = `${selectedMonth}-${lastDay}`;
 
-    const { data, error } = await supabase
-      .from('packaging_costs')
-      .select('*')
-      .gte('date', startDate)
-      .lte('date', endDate)
-      .order('date', { ascending: false });
+    try {
+      const { data, error } = await supabase
+        .from('packaging_costs')
+        .select('*')
+        .gte('date', startDate)
+        .lte('date', endDate)
+        .order('date', { ascending: false });
 
-    if (error) {
+      if (error) throw error;
+      
+      setPackagingCosts(data || []);
+    } catch (error) {
+      console.error("Error fetching packaging costs:", error);
       toast({
         title: "Error",
-        description: "Failed to fetch packaging costs",
+        description: "Failed to fetch packaging costs. Please try again later.",
         variant: "destructive",
       });
-    } else {
-      setPackagingCosts(data || []);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -190,10 +200,18 @@ export function Packaging() {
           <Package2 className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">PKR {totalPackagingCost.toLocaleString()}</div>
-          <p className="text-xs text-muted-foreground">
-            For {new Date(selectedMonth).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
-          </p>
+          {isLoading ? (
+            <div className="flex items-center justify-center h-12">
+              <p className="text-sm text-muted-foreground">Loading...</p>
+            </div>
+          ) : (
+            <>
+              <div className="text-2xl font-bold">PKR {totalPackagingCost.toLocaleString()}</div>
+              <p className="text-xs text-muted-foreground">
+                For {new Date(selectedMonth).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
+              </p>
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -262,49 +280,55 @@ export function Packaging() {
             Packaging Costs for {new Date(selectedMonth).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
           </CardTitle>
           <CardDescription>
-            {packagingCosts.length} entries found
+            {isLoading ? "Loading..." : `${packagingCosts.length} entries found`}
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead>Amount</TableHead>
-                  <TableHead>Added On</TableHead>
-                  <TableHead>Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {packagingCosts.map((cost) => (
-                  <TableRow key={cost.id}>
-                    <TableCell>{new Date(cost.date).toLocaleDateString()}</TableCell>
-                    <TableCell className="max-w-md">
-                      <div className="truncate">{cost.description}</div>
-                    </TableCell>
-                    <TableCell className="font-medium">PKR {cost.amount.toLocaleString()}</TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {new Date(cost.created_at).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => openDeleteConfirm(cost)}
-                      >
-                        <Trash2 className="h-4 w-4 text-red-500" />
-                        <span className="sr-only">Delete</span>
-                      </Button>
-                    </TableCell>
+          {isLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <p className="text-muted-foreground">Loading packaging costs...</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Description</TableHead>
+                    <TableHead>Amount</TableHead>
+                    <TableHead>Added On</TableHead>
+                    <TableHead>Actions</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+                </TableHeader>
+                <TableBody>
+                  {packagingCosts.map((cost) => (
+                    <TableRow key={cost.id}>
+                      <TableCell>{new Date(cost.date).toLocaleDateString()}</TableCell>
+                      <TableCell className="max-w-md">
+                        <div className="truncate">{cost.description}</div>
+                      </TableCell>
+                      <TableCell className="font-medium">PKR {cost.amount.toLocaleString()}</TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {new Date(cost.created_at).toLocaleDateString()}
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => openDeleteConfirm(cost)}
+                        >
+                          <Trash2 className="h-4 w-4 text-red-500" />
+                          <span className="sr-only">Delete</span>
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
           
-          {packagingCosts.length === 0 && (
+          {!isLoading && packagingCosts.length === 0 && (
             <div className="text-center py-8 text-muted-foreground">
               No packaging costs found for this month
             </div>

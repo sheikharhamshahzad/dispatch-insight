@@ -1,6 +1,6 @@
 import { createContext, useContext, useState } from "react";
 
-export type TabKey = "dashboard" | "orders" | "ad-costs" | "packaging" | "inventory";
+export type TabKey = "dashboard" | "orders" | "ad-costs" | "packaging" | "batch-inventory";
 
 type Ctx = {
   activeTab: TabKey;

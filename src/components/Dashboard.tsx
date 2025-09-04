@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
@@ -119,10 +119,35 @@ export function Dashboard() {
     setSalesTaxInput(salesTax.toString());
   };
 
+  // Add reference to Orders component's calculateCOGSAndCourierStats function
+  const calculateCOGSRef = useRef<null | ((ordersData: any[]) => number)>(null);
+  
+  // Function to get COGS directly from Orders component's logic
+  const getCOGSFromOrders = async (ordersData: any[]) => {
+    const deliveredOrders = ordersData.filter(order => order.order_status === 'delivered');
+    let totalCOGS = 0;
+    
+    // This exactly mirrors the Orders.tsx COGS calculation
+    for (const order of deliveredOrders) {
+      if (order.cogs && order.cogs > 0) {
+        // Use the saved COGS value directly with the exact same rounding
+        totalCOGS += Math.round(order.cogs);
+      }
+    }
+    
+    console.log('Dashboard calculated COGS:', totalCOGS);
+    return totalCOGS;
+  };
+  
   // Update the fetchDashboardData function
   const fetchDashboardData = async () => {
     const startDate = `${selectedMonth}-01`;
-    const endDate = `${selectedMonth}-31`;
+    // Make sure to get the right end date for the month
+    const lastDay = new Date(parseInt(selectedMonth.split('-')[0]), 
+                             parseInt(selectedMonth.split('-')[1]), 0).getDate();
+    const endDate = `${selectedMonth}-${lastDay}`;
+    
+    console.log(`Fetching dashboard data from ${startDate} to ${endDate}`);
 
     // Fetch orders data
     const { data: orders } = await supabase
@@ -165,36 +190,23 @@ export function Dashboard() {
       const avgCourierFee = orders.length > 0 ? totalCourierFees / orders.length : 0;
       
       const totalAdSpend = adCosts.reduce((sum, cost) => sum + cost.amount, 0);
-      
-      // Calculate packaging costs
       const totalPackagingCost = packagingCosts.reduce((sum, cost) => sum + cost.amount, 0);
-      
-      // Calculate sales tax
       const totalSalesTax = (salesTax / 100) * totalRevenue;
       
-      // Calculate COGS only for delivered orders using the EXACT same function as Orders component
-      const deliveredOrders = orders.filter(order => order.order_status === 'delivered');
-      let totalCOGS = 0;
+      // Calculate COGS using the exact same method as Orders.tsx
+      const totalCOGS = await getCOGSFromOrders(orders);
       
-      // Process delivered orders to calculate COGS - using the same logic as Orders component
-      deliveredOrders.forEach(order => {
-        if (!order.product_name) return;
-        
-        const parsedProducts = parseProductDescriptions(order.product_name);
-        
-        parsedProducts.forEach(({ product, variant, quantity, fullProductName }) => {
-          // Use the exact same matching function from Orders component
-          const matchingProduct = findMatchingProduct(inventoryData, product, variant, fullProductName);
-          
-          if (matchingProduct && typeof matchingProduct.cogs === 'number') {
-            totalCOGS += matchingProduct.cogs * quantity;
-          }
+      // Log every delivered order's COGS for debugging
+      orders
+        .filter(order => order.order_status === 'delivered')
+        .forEach(order => {
+          console.log(`Order ${order.order_id}: COGS = ${order.cogs || 'not set'}`);
         });
-      });
 
-      // Update net profit calculation to include sales tax
+      // Update net profit calculation with the corrected COGS
       const netProfit = totalRevenue - totalCourierFees - totalAdSpend - totalCOGS - totalPackagingCost - totalSalesTax;
 
+      // Set state with the corrected values
       setStats({
         totalDispatched,
         totalDelivered,
