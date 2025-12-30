@@ -575,71 +575,93 @@ export function Orders() {
   const fetchOrders = async () => {
     const seq = ++fetchSeq.current;
 
-    let query = supabase.from('orders').select('*');
-    
-    // Apply date filtering
-    if (useCustomDateRange && date?.from) {
-      const fromStr = format(date.from, 'yyyy-MM-dd');
-      const toDate = date.to ?? date.from;
-      const toNextDay = new Date(toDate.getFullYear(), toDate.getMonth(), toDate.getDate() + 1);
-      const toNextDayStr = format(toNextDay, 'yyyy-MM-dd');
+    const allOrders: any[] = [];
+    const pageSize = 1000;
+    let page = 0;
+    let hasMore = true;
 
-      query = query.gte('dispatch_date', fromStr).lt('dispatch_date', toNextDayStr);
-    } else {
-      const [year, month] = selectedMonth.split('-').map(Number);
-      const monthStart = new Date(year, month - 1, 1);
-      const nextMonthStart = new Date(year, month, 1);
-      const monthStartStr = format(monthStart, 'yyyy-MM-dd');
-      const nextMonthStartStr = format(nextMonthStart, 'yyyy-MM-dd');
-
-      query = query.gte('dispatch_date', monthStartStr).lt('dispatch_date', nextMonthStartStr);
-    }
-    
-    // Updated search logic to include both order_id and customer_name
-    if (searchQuery.trim()) {
-      // Use the .or() method to search in both columns
-      query = query.or(`order_id.ilike.%${searchQuery.trim()}%,customer_name.ilike.%${searchQuery.trim()}%`);
-    }
-
-    if (statusFilter) {
-      query = query.eq('order_status', statusFilter);
-    }
-
-    const { data, error } = await query.order('dispatch_date', { ascending: false });
-
-    if (seq !== fetchSeq.current) return;
-
-    if (error) {
-      toast({
-        title: "Error",
-        description: "Failed to fetch orders",
-        variant: "destructive",
-      });
-    } else {
-      // Map the data directly
-      const mappedOrders = (data || []).map((item) => ({
-        id: item.id,
-        tracking_number: item.tracking_number,
-        order_id: item.order_id,
-        customer_name: item.customer_name,
-        customer_address: item.customer_address,
-        customer_phone: item.customer_phone || '',
-        product_name: item.product_name,
-        amount: item.amount,
-        order_status: item.order_status,
-        dispatch_date: item.dispatch_date,
-        return_received: item.return_received,
-        courier_fee: item.courier_fee,
-        customer_city: item.customer_city || '',
-        precogs: item.precogs,
-        cogs: item.cogs
-      }));
-
-      setOrders(mappedOrders);
+    while (hasMore) {
+      let query = supabase.from('orders').select('*');
       
-      // Automatically update COGS for delivered orders that don't have it set
-      updateOrderCOGSOnDelivery(mappedOrders);
+      // Apply date filtering
+      if (useCustomDateRange && date?.from) {
+        const fromStr = format(date.from, 'yyyy-MM-dd');
+        const toDate = date.to ?? date.from;
+        const toNextDay = new Date(toDate.getFullYear(), toDate.getMonth(), toDate.getDate() + 1);
+        const toNextDayStr = format(toNextDay, 'yyyy-MM-dd');
+
+        query = query.gte('dispatch_date', fromStr).lt('dispatch_date', toNextDayStr);
+      } else {
+        const [year, month] = selectedMonth.split('-').map(Number);
+        const monthStart = new Date(year, month - 1, 1);
+        const nextMonthStart = new Date(year, month, 1);
+        const monthStartStr = format(monthStart, 'yyyy-MM-dd');
+        const nextMonthStartStr = format(nextMonthStart, 'yyyy-MM-dd');
+
+        query = query.gte('dispatch_date', monthStartStr).lt('dispatch_date', nextMonthStartStr);
+      }
+      
+      // Updated search logic
+      if (searchQuery.trim()) {
+        query = query.or(`order_id.ilike.%${searchQuery.trim()}%,customer_name.ilike.%${searchQuery.trim()}%`);
+      }
+
+      if (statusFilter) {
+        query = query.eq('order_status', statusFilter);
+      }
+
+      // Add pagination
+      query = query
+        .order('dispatch_date', { ascending: false })
+        .range(page * pageSize, (page + 1) * pageSize - 1);
+
+      const { data, error } = await query;
+
+      if (seq !== fetchSeq.current) return;
+
+      if (error) {
+        toast({
+          title: "Error",
+          description: "Failed to fetch orders",
+          variant: "destructive",
+        });
+        break;
+      }
+
+      if (data) {
+        allOrders.push(...data);
+        hasMore = data.length === pageSize;
+        page++;
+      } else {
+        hasMore = false;
+      }
     }
+
+    console.log(`Fetched ${allOrders.length} total orders`);
+
+    // Map the data directly
+    const mappedOrders = allOrders.map((item) => ({
+      id: item.id,
+      tracking_number: item.tracking_number,
+      order_id: item.order_id,
+      customer_name: item.customer_name,
+      customer_address: item.customer_address,
+      customer_phone: item.customer_phone || '',
+      product_name: item.product_name,
+      amount: item.amount,
+      order_status: item.order_status,
+      dispatch_date: item.dispatch_date,
+      return_received: item.return_received,
+      courier_fee: item.courier_fee,
+      customer_city: item.customer_city || '',
+      precogs: item.precogs,
+      cogs: item.cogs
+    }));
+
+    setOrders(mappedOrders);
+    
+    // Automatically update COGS for delivered orders that don't have it set
+    updateOrderCOGSOnDelivery(mappedOrders);
   };
 
   // Helper function to get status colors for icons and badges

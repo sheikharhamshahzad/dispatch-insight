@@ -139,22 +139,50 @@ export function Dashboard() {
     return totalCOGS;
   };
   
+  // Helper function to fetch all records with pagination
+  const fetchAllOrders = async (startDate: string, endDate: string) => {
+    const allOrders: any[] = [];
+    const pageSize = 1000;
+    let page = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*')
+        .gte('dispatch_date', startDate)
+        .lte('dispatch_date', endDate)
+        .range(page * pageSize, (page + 1) * pageSize - 1);
+
+      if (error) {
+        console.error('Error fetching orders:', error);
+        break;
+      }
+
+      if (data) {
+        allOrders.push(...data);
+        hasMore = data.length === pageSize;
+        page++;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    return allOrders;
+  };
+
   // Update the fetchDashboardData function
   const fetchDashboardData = async () => {
     const startDate = `${selectedMonth}-01`;
-    // Make sure to get the right end date for the month
     const lastDay = new Date(parseInt(selectedMonth.split('-')[0]), 
                              parseInt(selectedMonth.split('-')[1]), 0).getDate();
     const endDate = `${selectedMonth}-${lastDay}`;
     
     console.log(`Fetching dashboard data from ${startDate} to ${endDate}`);
 
-    // Fetch orders data
-    const { data: orders } = await supabase
-      .from('orders')
-      .select('*')
-      .gte('dispatch_date', startDate)
-      .lte('dispatch_date', endDate);
+    // Fetch all orders with pagination
+    const orders = await fetchAllOrders(startDate, endDate);
+    console.log(`Fetched ${orders.length} total orders`);
 
     // Fetch ad costs data
     const { data: adCosts } = await supabase
