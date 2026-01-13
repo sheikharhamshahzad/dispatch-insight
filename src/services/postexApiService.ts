@@ -65,4 +65,43 @@ export const fetchOrderDetails = async (trackingNumber: string, dispatchDate?: s
   }
 };
 
+/**
+ * Bulk fetch order details from PostEx API
+ * @param trackingNumbers Array of tracking numbers to look up
+ * @param token The API token to use
+ * @returns Response from the bulk API
+ */
+export const fetchBulkOrderDetails = async (
+  trackingNumbers: string[],
+  token: string = POSTEX_API_CONFIG.NEW_TOKEN
+): Promise<any> => {
+  try {
+    if (trackingNumbers.length === 0) return null;
+    
+    const apiUrl = 'https://api.postex.pk/services/integration/api/order/v1/track-bulk-order';
+    const trackingParam = trackingNumbers.join(',');
+    
+    console.log(`Bulk fetching ${trackingNumbers.length} orders...`);
+    
+    const response = await fetch(`${apiUrl}?TrackingNumbers=${trackingParam}`, {
+      method: 'GET',
+      headers: {
+        token,
+        Accept: 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`PostEx bulk error ${response.status}: ${errorText}`);
+      return null;
+    }
+    
+    return await response.json();
+  } catch (e) {
+    console.error('Bulk fetch error:', e);
+    return null;
+  }
+};
+
 

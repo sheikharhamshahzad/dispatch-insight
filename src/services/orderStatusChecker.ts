@@ -1,44 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
-import { fetchOrderDetails, POSTEX_API_CONFIG } from "./postexApiService";
-
-interface PostExStatusResponse {
-  statusCode: string;
-  statusMessage: string;
-  dist: {
-    customerName: string;
-    customerPhone: string;
-    deliveryAddress: string;
-    invoicePayment: number;
-    orderDetail: string;
-    orderPickupDate: string;
-    orderRefNumber: string;
-    orderDeliveryDate: string;
-    transactionTax: number;
-    transactionFee: number;
-    trackingNumber: string;
-    transactionDate: string;
-    upfrontPayment: number;
-    merchantName: string;
-    transactionStatus: string;
-    reversalTax: number;
-    reversalFee: number;
-    cityName: string;
-    pickupAddress: string;
-    transactionNotes: string;
-    reservePaymentDate: string;
-    reservePayment: number;
-    balancePayment: number;
-    actualWeight: number;
-    transactionStatusHistory: Array<{
-      transactionStatusMessage: string;
-      transactionStatusMessageCode: string;
-      updatedAt: string;
-    }>;
-    items: number;
-    invoiceDivision: number;
-    returnAddress: string;
-  }
-}
+import { fetchBulkOrderDetails, POSTEX_API_CONFIG } from "./postexApiService";
 
 // The final statuses that don't need further checking
 const FINAL_STATUSES = ['delivered', 'returned'];
@@ -46,39 +7,11 @@ const FINAL_STATUSES = ['delivered', 'returned'];
 // Track the checker's running state
 let isCheckerRunning = false;
 
-/**
- * Update order status and courier fee in the database
- */
-const updateOrderStatusAndFee = async (
-  trackingNumber: string, 
-  status: string, 
-  transactionFee: number, 
-  transactionTax: number
-): Promise<boolean> => {
-  try {
-    // Only update the status and courier fee fields, not the entire record
-    const { error } = await supabase
-      .from('orders')
-      .update({ 
-        order_status: status.toLowerCase(),
-        courier_fee: transactionFee + transactionTax
-      })
-      .eq('tracking_number', trackingNumber);
-    
-    if (error) {
-      console.error(`Error updating order ${trackingNumber}:`, error);
-      return false;
-    }
-    
-    return true;
-  } catch (error) {
-    console.error(`Exception updating order ${trackingNumber}:`, error);
-    return false;
-  }
-};
+// Batch size for bulk API calls (PostEx may have limits)
+const BATCH_SIZE = 50;
 
 /**
- * Main function to check and update orders
+ * Main function to check and update orders using BULK API
  */
 export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
   // Prevent multiple concurrent executions
@@ -88,7 +21,7 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
   }
   
   isCheckerRunning = true;
-  console.log('Starting order status check...');
+  console.log('Starting bulk order status check...');
   
   try {
     // Get all non-final status orders
@@ -102,42 +35,134 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
       return;
     }
     
-    console.log(`Found ${pendingOrders?.length || 0} orders to check`);
+    const orders = pendingOrders || [];
+    console.log(`Found ${orders.length} orders to check`);
     
-    // Process each order
-    const normalize = (d?: string) => (d ? d.slice(0,10) : "");
+    if (orders.length === 0) {
+      return;
+    }
+
+    // Separate orders by token (OLD vs NEW based on dispatch date)
+    const oldTokenOrders: typeof orders = [];
+    const newTokenOrders: typeof orders = [];
+    
+    for (const order of orders) {
+      const dispatchDate = order.dispatch_date?.slice(0, 10) || '';
+      if (dispatchDate && dispatchDate <= POSTEX_API_CONFIG.CUTOFF_DATE) {
+        oldTokenOrders.push(order);
+      } else {
+        newTokenOrders.push(order);
+      }
+    }
+
+    console.log(`Split: ${oldTokenOrders.length} OLD token, ${newTokenOrders.length} NEW token`);
+
     let updatedCount = 0;
 
-    for (const order of (pendingOrders || [])) {
-      const normalizedDate = normalize(order.dispatch_date);
-      const tokenType = normalizedDate && normalizedDate <= POSTEX_API_CONFIG.CUTOFF_DATE ? 'OLD' : 'NEW';
-      const orderData = await fetchOrderDetails(order.tracking_number, normalizedDate);
+    // Helper to process a batch with a specific token
+    const processBatch = async (
+      batch: typeof orders, 
+      token: string, 
+      tokenLabel: string
+    ): Promise<number> => {
+      let batchUpdates = 0;
+      const trackingNumbers = batch.map(o => o.tracking_number);
+      
+      console.log(`[${tokenLabel}] Fetching ${trackingNumbers.length} orders in bulk...`);
+      
+      const response = await fetchBulkOrderDetails(trackingNumbers, token);
+      
+      if (!response || response.statusCode !== '200' || !response.dist) {
+        console.error(`[${tokenLabel}] Bulk API failed:`, response?.statusMessage || 'No response');
+        return 0;
+      }
 
-      if (orderData?.statusCode === "200") {
-        const { dist } = orderData;
+      console.log(`[${tokenLabel}] Got ${response.dist.length} results from API`);
+
+      // Create a map of tracking number -> order for quick lookup
+      const orderMap = new Map(batch.map(o => [o.tracking_number, o]));
+
+      // Process each result
+      for (const item of response.dist) {
+        if (item.message !== 'SUCCESSFULLY RETRIEVE ORDER' || !item.trackingResponse) {
+          console.log(`[${tokenLabel}] Skipping ${item.trackingNumber}: ${item.message}`);
+          continue;
+        }
+
+        const dist = item.trackingResponse;
+        const trackingNumber = item.trackingNumber;
+        const existingOrder = orderMap.get(trackingNumber);
+        
+        if (!existingOrder) {
+          console.log(`[${tokenLabel}] Order ${trackingNumber} not in our batch, skipping`);
+          continue;
+        }
+
         const newStatus = dist.transactionStatus.toLowerCase();
-        if (newStatus !== order.order_status) {
+        
+        // Only update if status changed
+        if (newStatus !== existingOrder.order_status) {
+          // Calculate courier fee based on status (same logic as before)
           let courierFeeUpdate: number | undefined;
+          
           if (newStatus === 'delivered') {
+            // For delivered: transactionFee + transactionTax
             courierFeeUpdate = (dist.transactionFee || 0) + (dist.transactionTax || 0);
           } else if (newStatus === 'returned') {
+            // For returned: reversalFee + reversalTax
             courierFeeUpdate = (dist.reversalFee || 0) + (dist.reversalTax || 0);
           }
-          const updateObj: any = { order_status: newStatus };
-          if (courierFeeUpdate !== undefined) updateObj.courier_fee = courierFeeUpdate;
 
-          await supabase.from('orders')
+          const updateObj: Record<string, any> = { order_status: newStatus };
+          if (courierFeeUpdate !== undefined) {
+            updateObj.courier_fee = courierFeeUpdate;
+          }
+
+          const { error: updateError } = await supabase
+            .from('orders')
             .update(updateObj)
-            .eq('tracking_number', order.tracking_number);
+            .eq('tracking_number', trackingNumber);
 
-          console.log(`[${tokenType}] ${order.tracking_number} → ${newStatus}${courierFeeUpdate !== undefined ? ` (fee ${courierFeeUpdate})` : ''}`);
-          updatedCount++;
+          if (updateError) {
+            console.error(`[${tokenLabel}] Error updating ${trackingNumber}:`, updateError);
+          } else {
+            console.log(
+              `[${tokenLabel}] ${trackingNumber}: ${existingOrder.order_status} → ${newStatus}` +
+              (courierFeeUpdate !== undefined ? ` (fee: ${courierFeeUpdate})` : '')
+            );
+            batchUpdates++;
+          }
         }
       }
-      await new Promise(r => setTimeout(r, 500));
+      
+      return batchUpdates;
+    };
+
+    // Process OLD token orders in batches
+    if (oldTokenOrders.length > 0) {
+      console.log(`Processing ${oldTokenOrders.length} orders with OLD token...`);
+      for (let i = 0; i < oldTokenOrders.length; i += BATCH_SIZE) {
+        const batch = oldTokenOrders.slice(i, i + BATCH_SIZE);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        const totalBatches = Math.ceil(oldTokenOrders.length / BATCH_SIZE);
+        console.log(`[OLD] Processing batch ${batchNum}/${totalBatches}`);
+        updatedCount += await processBatch(batch, POSTEX_API_CONFIG.OLD_TOKEN, 'OLD');
+      }
     }
-    
-    console.log(`Completed order status check. Updated ${updatedCount} orders.`);
+
+    // Process NEW token orders in batches
+    if (newTokenOrders.length > 0) {
+      console.log(`Processing ${newTokenOrders.length} orders with NEW token...`);
+      for (let i = 0; i < newTokenOrders.length; i += BATCH_SIZE) {
+        const batch = newTokenOrders.slice(i, i + BATCH_SIZE);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        const totalBatches = Math.ceil(newTokenOrders.length / BATCH_SIZE);
+        console.log(`[NEW] Processing batch ${batchNum}/${totalBatches}`);
+        updatedCount += await processBatch(batch, POSTEX_API_CONFIG.NEW_TOKEN, 'NEW');
+      }
+    }
+
+    console.log(`✅ Completed bulk order status check. Updated ${updatedCount} orders.`);
   } catch (error) {
     console.error('Error in order status checker:', error);
   } finally {

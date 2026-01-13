@@ -299,6 +299,10 @@ export function Orders() {
   const [editingOrder, setEditingOrder] = useState<string | null>(null);
   const [editingAmount, setEditingAmount] = useState<string>('');
 
+  // NEW: Add these states for editing COGS/PreCOGS
+  const [editingCogsOrder, setEditingCogsOrder] = useState<string | null>(null);
+  const [editingCogsValue, setEditingCogsValue] = useState<string>('');
+
   // Add this new state for status filtering at the top of your component
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
 
@@ -1378,6 +1382,60 @@ export function Orders() {
     }
   };
 
+  // NEW: Add handler for editing COGS/PreCOGS
+  const startEditingCogs = (order: Order) => {
+    setEditingCogsOrder(order.id);
+    // If delivered, edit cogs; otherwise edit precogs
+    if (order.order_status === 'delivered') {
+      setEditingCogsValue(order.cogs?.toString() || '');
+    } else {
+      setEditingCogsValue(order.precogs?.toString() || '');
+    }
+  };
+
+  const handleCogsUpdate = async (order: Order) => {
+    try {
+      const value = editingCogsValue.trim() === '' ? null : parseFloat(editingCogsValue);
+      if (editingCogsValue.trim() !== '' && isNaN(value as number)) {
+        throw new Error("Invalid value");
+      }
+      
+      // Determine which field to update based on order status
+      const isDelivered = order.order_status === 'delivered';
+      const updateField = isDelivered ? 'cogs' : 'precogs';
+      
+      // Update database
+      const { error } = await supabase
+        .from('orders')
+        .update({ [updateField]: value })
+        .eq('id', order.id);
+      
+      if (error) throw error;
+      
+      // Update local state
+      setOrders(orders.map(o => 
+        o.id === order.id 
+          ? { ...o, [updateField]: value } 
+          : o
+      ));
+      
+      toast({
+        title: "Success",
+        description: `${isDelivered ? 'COGS' : 'PreCOGS'} updated successfully`,
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: `Failed to update ${order.order_status === 'delivered' ? 'COGS' : 'PreCOGS'}`,
+        variant: "destructive",
+      });
+    } finally {
+      // Reset editing state
+      setEditingCogsOrder(null);
+      setEditingCogsValue('');
+    }
+  };
+
   // Helper function for inventory updates (stub implementation if you don't have this defined)
   const processInventoryUpdates = async (productName: string, quantity: number) => {
     // Implement or reference your inventory update function here
@@ -1876,13 +1934,6 @@ export function Orders() {
                       </div>
                     </SelectItem>
                     
-                    <SelectItem value="delivery under review">
-                      <div className="flex items-center">
-                        <div className="w-3 h-3 rounded-full bg-orange-500 mr-2"></div>
-                        <span>Delivery Under Review</span>
-                      </div>
-                    </SelectItem>
-                    
                     <SelectItem value="out for return">
                       <div className="flex items-center">
                         <div className="w-3 h-3 rounded-full bg-red-500 mr-2"></div>
@@ -2017,14 +2068,55 @@ export function Orders() {
                         {order.courier_fee ? `PKR ${order.courier_fee.toLocaleString()}` : '-'}
                       </TableCell>
                       <TableCell>
-                        {order.order_status === 'delivered' && order.cogs ? (
-                          <span className="font-medium">PKR {order.cogs.toLocaleString()}</span>
+                        {editingCogsOrder === order.id ? (
+                          <div className="flex items-center space-x-2">
+                            <Input
+                              type="number"
+                              value={editingCogsValue}
+                              onChange={(e) => setEditingCogsValue(e.target.value)}
+                              className="w-20"
+                              placeholder="0"
+                            />
+                            <Button size="sm" onClick={() => handleCogsUpdate(order)}>
+                              Save
+                            </Button>
+                            <Button 
+                              size="sm" 
+                              variant="ghost" 
+                              onClick={() => {
+                                setEditingCogsOrder(null);
+                                setEditingCogsValue('');
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
                         ) : (
-                          order.precogs ? (
-                            <span className="text-gray-500">PKR {order.precogs.toLocaleString()}</span>
-                          ) : (
-                            '-'
-                          )
+                          <div className="flex items-center space-x-2">
+                            {order.order_status === 'delivered' ? (
+                              // Delivered: show COGS in black
+                              <span className="font-medium">
+                                {order.cogs ? `PKR ${order.cogs.toLocaleString()}` : '-'}
+                              </span>
+                            ) : (
+                              // Not delivered: show PreCOGS in gray
+                              <span className="text-gray-500">
+                                {order.precogs ? `PKR ${order.precogs.toLocaleString()}` : '-'}
+                              </span>
+                            )}
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              className="h-8 w-8 p-0" 
+                              onClick={() => startEditingCogs(order)}
+                              title={order.order_status === 'delivered' ? 'Edit COGS' : 'Edit PreCOGS'}
+                            >
+                              <Pencil className="h-4 w-4" />
+                              <span className="sr-only">
+                                {order.order_status === 'delivered' ? 'Edit COGS' : 'Edit PreCOGS'}
+                              </span>
+                            </Button>
+                          </div>
                         )}
                       </TableCell>
                       <TableCell>{new Date(order.dispatch_date).toLocaleDateString()}</TableCell>
