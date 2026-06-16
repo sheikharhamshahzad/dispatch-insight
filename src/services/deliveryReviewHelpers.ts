@@ -122,10 +122,11 @@ export function getLatestStatusHistoryEntry(
 }
 
 /**
- * Detect all attempt reasons from transaction status history
+ * Detect attempt reasons from transaction status history
  * Scans for code 0013 entries and extracts reason codes
+ * ONLY RETURNS THE LATEST 0013 ENTRY to prevent duplicate reviews
  * @param trackingResponse The tracking response from PostEx
- * @returns Array of detected AttemptMatches
+ * @returns Array with at most ONE AttemptMatch (the latest 0013 entry)
  */
 export function detectAttemptReasonsFromStatusHistory(
   trackingResponse: NormalizedTrackingResponse | null | undefined
@@ -135,7 +136,8 @@ export function detectAttemptReasonsFromStatusHistory(
   const history = trackingResponse.transactionStatusHistory;
   if (!Array.isArray(history)) return [];
 
-  const matches: AttemptMatch[] = [];
+  // Find ALL 0013 entries first
+  const allAttemptEntries: Array<{ entry: PostExStatusHistoryEntry; reason: AttemptReason }> = [];
 
   for (const entry of history) {
     const message = entry?.transactionStatusMessage || "";
@@ -149,14 +151,25 @@ export function detectAttemptReasonsFromStatusHistory(
     const reason = parseAttemptReason(message);
 
     if (reason) {
-      matches.push({
-        ...reason,
-        historyEntry: entry
+      allAttemptEntries.push({
+        entry,
+        reason
       });
     }
   }
 
-  return matches;
+  // Return only the LATEST 0013 entry to prevent duplicate reviews
+  if (allAttemptEntries.length === 0) {
+    return [];
+  }
+
+  const latestAttempt = allAttemptEntries[allAttemptEntries.length - 1];
+  return [
+    {
+      ...latestAttempt.reason,
+      historyEntry: latestAttempt.entry
+    }
+  ];
 }
 
 /**
@@ -191,6 +204,81 @@ export function detectAttemptReasonFallback(
   }
 
   return null;
+}
+
+/**
+ * Get all previous attempt history (for display purposes only)
+ * Returns all 0013 entries EXCEPT the latest one (to show what came before)
+ * @param trackingResponse The tracking response from PostEx
+ * @returns Array of previous attempt details
+ */
+export interface PreviousAttempt {
+  code: string;
+  label: string;
+  display: string;
+  date: string;
+}
+
+export function getPreviousAttemptsHistory(
+  trackingResponse: NormalizedTrackingResponse | null | undefined
+): PreviousAttempt[] {
+  if (!trackingResponse) return [];
+
+  const history = trackingResponse.transactionStatusHistory;
+  if (!Array.isArray(history)) return [];
+
+  // Find ALL 0013 entries
+  const allAttempts: PreviousAttempt[] = [];
+
+  for (const entry of history) {
+    const message = entry?.transactionStatusMessage || "";
+    const code = entry?.transactionStatusMessageCode || "";
+
+    const isAttemptEntry = code === "0013" || message.toUpperCase().includes("ATTEMPT MADE");
+    if (!isAttemptEntry) continue;
+
+    const reason = parseAttemptReason(message);
+    if (reason) {
+      allAttempts.push({
+        code: reason.code,
+        label: reason.label,
+        display: reason.display,
+        date: entry.updatedAt || ""
+      });
+    }
+  }
+
+  // Return all except the latest (if more than one exists)
+  if (allAttempts.length <= 1) {
+    return [];
+  }
+
+  // Return all except the last one (which is the current/latest)
+  return allAttempts.slice(0, -1);
+}
+
+/**
+ * Format previous attempts for display
+ * @param attempts The previous attempts
+ * @returns Formatted string like "CNA on Jun 13"
+ */
+export function formatPreviousAttempts(attempts: PreviousAttempt[]): string {
+  if (attempts.length === 0) return "";
+
+  const formatted = attempts
+    .map((a) => {
+      try {
+        const date = new Date(a.date);
+        const month = date.toLocaleDateString("en-US", { month: "short" });
+        const day = date.getDate();
+        return `${a.code} on ${month} ${day}`;
+      } catch {
+        return a.code;
+      }
+    })
+    .join(", ");
+
+  return formatted;
 }
 
 /**

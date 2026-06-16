@@ -70,15 +70,20 @@ export async function saveOrderStatusHistoryIfNew(
 
 /**
  * Create or update delivery reviews from tracking response
- * This creates a new delivery review for each detected attempt reason
+ * Implements UPSERT pattern to prevent duplicate Delivery Under Review entries
  * 
- * DEDUPLICATION LOGIC:
- * - If an order is already in delivery_reviews (regardless of reason code), 
- *   we don't create a new review even if a different reason is detected
- * - This prevents duplicate entries when an order is reattempted and gets a new status
- * - Example: Order with RFD is detected → review created. Later, reattempt is made 
- *   and status changes to ICA. Since order is already in delivery_reviews, no new 
- *   review is created. The existing review's tracking history is updated instead.
+ * DEDUPLICATION/UPSERT LOGIC:
+ * 1. Only the LATEST [0013] Attempt Made is returned from detectAttemptReasonsFromStatusHistory()
+ * 2. Check if an OPEN delivery review already exists for this tracking number
+ * 3. If OPEN review exists:
+ *    - UPDATE it with the latest attempt reason and details
+ *    - Preserve existing contact tracking fields (whatsapp_sent, sales_whatsapp_sent, etc)
+ *    - Update attempt_date, attempt_reason, and status history
+ *    - This ensures only ONE card appears per tracking number
+ * 4. If COMPLETED review exists:
+ *    - SKIP (do not modify completed cases)
+ * 5. If NO review exists:
+ *    - INSERT a new delivery review
  */
 export async function createDeliveryReviewsFromTrackingResponse(
   trackingNumber: string,
@@ -97,7 +102,7 @@ export async function createDeliveryReviewsFromTrackingResponse(
   try {
     const createdReviews: Array<{ id: string; reason: string }> = [];
 
-    // Detect attempt reasons from status history
+    // Detect attempt reasons from status history (returns only latest 0013)
     const attemptMatches = detectAttemptReasonsFromStatusHistory(postexResponse);
 
     if (attemptMatches.length === 0) {
@@ -106,21 +111,14 @@ export async function createDeliveryReviewsFromTrackingResponse(
     }
 
     const latestEntry = getLatestStatusHistoryEntry(postexResponse.transactionStatusHistory);
+    const match = attemptMatches[0]; // Only one match now (the latest)
 
-    // DEDUPLICATION CHECK: Check if this tracking number already has ANY review
-    // (open, in courier_followup, OR completed). If it has ANY review record,
-    // skip creating new reviews. This prevents:
-    //   1. Duplicate open reviews when the order gets a new attempt-style status.
-    //   2. A previously-closed/completed case from being re-created as a new
-    //      open review when the background status checker sees another attempt
-    //      reason on the same tracking number (this was the root cause of
-    //      "closed cases re-appearing in open cases").
-    // If you ever need to legitimately reopen a closed case, do so explicitly
-    // by updating the existing row instead of inserting a new one.
+    // Check for existing open review for this tracking number
     const { data: existingReviews, error: existingReviewsError } = await supabase
       .from("delivery_reviews")
-      .select("id, review_reason_code, review_status")
-      .eq("tracking_number", trackingNumber);
+      .select("id, review_reason_code, review_status, customer_whatsapp_sent, customer_whatsapp_sent_at, sales_whatsapp_sent, sales_whatsapp_sent_at, postex_email_sent, postex_email_sent_at")
+      .eq("tracking_number", trackingNumber)
+      .order("created_at", { ascending: false });
 
     if (existingReviewsError) {
       console.warn(
@@ -129,74 +127,104 @@ export async function createDeliveryReviewsFromTrackingResponse(
       );
     }
 
-    if (existingReviews && existingReviews.length > 0) {
-      const statusSummary = existingReviews
-        .map((r) => `${r.review_reason_code}:${r.review_status}`)
-        .join(", ");
+    // Find the first open review (if any)
+    const openReview = existingReviews?.find((r) => r.review_status === "open");
+    const completedReview = existingReviews?.find((r) => r.review_status === "completed");
+
+    // If there's a completed review, don't modify it
+    if (completedReview && !openReview) {
       console.log(
-        `[DeliveryReview] Order ${trackingNumber} already has ${existingReviews.length} review(s) [${statusSummary}]. Skipping duplicate creation (includes completed cases to avoid re-opening closed ones).`
+        `[DeliveryReview] Order ${trackingNumber} has completed review (${completedReview.review_reason_code}). Skipping to preserve closed case.`
       );
       return createdReviews;
     }
 
-    // For each detected attempt reason, create/update a delivery review
-    for (const match of attemptMatches) {
-      try {
+    // Build the review payload
+    const reviewPayload = {
+      order_id: orderData.id || null,
+      tracking_number: trackingNumber,
+      order_ref_number: postexResponse.orderRefNumber || null,
+      customer_name: orderData.customer_name || postexResponse.customerName || null,
+      customer_phone: orderData.customer_phone || postexResponse.customerPhone || null,
+      customer_city: orderData.customer_city || null,
+      delivery_address: orderData.customer_address || postexResponse.deliveryAddress || null,
+      order_detail: postexResponse.orderDetail || null,
+      order_amount: orderData.order_amount || null,
+      dispatch_date: orderData.dispatch_date ? new Date(orderData.dispatch_date).toISOString() : null,
+      attempt_date: new Date().toISOString(),
+      review_reason_code: match.code,
+      review_reason_label: match.label,
+      review_reason_display: match.display,
+      initial_attempt_status: postexResponse.transactionStatus || null,
+      initial_status_history_code: match.historyEntry?.transactionStatusMessageCode || null,
+      initial_status_history_message: match.historyEntry?.transactionStatusMessage || null,
+      initial_status_history_updated_at: match.historyEntry?.updatedAt || null,
+      latest_status_history_code: latestEntry?.transactionStatusMessageCode || null,
+      latest_status_history_message: latestEntry?.transactionStatusMessage || null,
+      latest_status_history_updated_at: latestEntry?.updatedAt || null,
+      current_order_status: postexResponse.transactionStatus?.toLowerCase() || null,
+      review_status: "open",
+      raw_postex_response: postexResponse
+    };
 
-        // Create new delivery review
-        const reviewPayload = {
-          order_id: orderData.id || null,
-          tracking_number: trackingNumber,
-          order_ref_number: postexResponse.orderRefNumber || null,
-          customer_name: orderData.customer_name || postexResponse.customerName || null,
-          customer_phone: orderData.customer_phone || postexResponse.customerPhone || null,
-          customer_city: orderData.customer_city || null,
-          delivery_address:
-            orderData.customer_address || postexResponse.deliveryAddress || null,
-          order_detail: postexResponse.orderDetail || null,
-          order_amount: orderData.order_amount || null,
-          dispatch_date: orderData.dispatch_date ? new Date(orderData.dispatch_date).toISOString() : null,
-          attempt_date: new Date().toISOString(),
-          review_reason_code: match.code,
-          review_reason_label: match.label,
-          review_reason_display: match.display,
-          initial_attempt_status: postexResponse.transactionStatus || null,
-          initial_status_history_code: match.historyEntry?.transactionStatusMessageCode || null,
-          initial_status_history_message: match.historyEntry?.transactionStatusMessage || null,
-          initial_status_history_updated_at: match.historyEntry?.updatedAt || null,
-          latest_status_history_code: latestEntry?.transactionStatusMessageCode || null,
-          latest_status_history_message: latestEntry?.transactionStatusMessage || null,
-          latest_status_history_updated_at: latestEntry?.updatedAt || null,
-          current_order_status: postexResponse.transactionStatus?.toLowerCase() || null,
-          review_status: "open",
-          raw_postex_response: postexResponse
-        };
+    try {
+      if (openReview) {
+        // UPSERT: Update existing open review with latest attempt details
+        console.log(
+          `[DeliveryReview] Updating existing open review for ${trackingNumber}: ${openReview.review_reason_code} → ${match.code}`
+        );
 
-        const { data: review, error } = await supabase
+        const { data: updated, error: updateError } = await supabase
+          .from("delivery_reviews")
+          .update(reviewPayload)
+          .eq("id", openReview.id)
+          .select("id")
+          .single();
+
+        if (updateError) {
+          console.error(
+            `[DeliveryReview] Error updating review for ${trackingNumber}:`,
+            updateError.message || JSON.stringify(updateError)
+          );
+          return createdReviews;
+        }
+
+        console.log(
+          `[DeliveryReview] Updated review ${updated.id} for ${trackingNumber}/${match.code}`
+        );
+        createdReviews.push({
+          id: updated.id,
+          reason: match.code
+        });
+      } else {
+        // INSERT: Create new delivery review
+        const { data: review, error: insertError } = await supabase
           .from("delivery_reviews")
           .insert([reviewPayload])
           .select("id")
           .single();
 
-        if (error) {
+        if (insertError) {
           console.error(
             `[DeliveryReview] Error creating review for ${trackingNumber}/${match.code}:`,
-            error.message || JSON.stringify(error)
+            insertError.message || JSON.stringify(insertError)
           );
-          continue;
+          return createdReviews;
         }
 
-        console.log(`[DeliveryReview] Created review ${review.id} for ${trackingNumber}/${match.code}`);
+        console.log(
+          `[DeliveryReview] Created review ${review.id} for ${trackingNumber}/${match.code}`
+        );
         createdReviews.push({
           id: review.id,
           reason: match.code
         });
-      } catch (error) {
-        console.error(
-          `[DeliveryReview] Exception creating review for ${trackingNumber}/${match.code}:`,
-          error instanceof Error ? error.message : JSON.stringify(error)
-        );
       }
+    } catch (error) {
+      console.error(
+        `[DeliveryReview] Exception creating/updating review for ${trackingNumber}/${match.code}:`,
+        error instanceof Error ? error.message : JSON.stringify(error)
+      );
     }
 
     return createdReviews;

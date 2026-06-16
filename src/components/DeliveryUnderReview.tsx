@@ -19,6 +19,8 @@ import { supabase } from "@/integrations/supabase/client";
 import {
   buildWhatsAppUrl,
   formatPakistanPhoneForWhatsApp,
+  getPreviousAttemptsHistory,
+  formatPreviousAttempts,
 } from "@/services/deliveryReviewHelpers";
 import { 
   markDeliveryReviewWhatsAppSent, 
@@ -200,7 +202,9 @@ export function DeliveryUnderReview() {
                 const nonOpenReviews = prevReviews.filter((r) => !openIds.has(r.id));
                 const merged = [...updatedOpenReviews, ...nonOpenReviews];
                 // Refresh stats from the merged list
-                calculateStats(merged);
+                const fromDate = date?.from || startOfDay(new Date());
+                const toDate = date?.to || endOfDay(new Date());
+                calculateStats(merged, fromDate, toDate);
                 return merged;
               });
             }
@@ -275,7 +279,7 @@ export function DeliveryUnderReview() {
 
       const reviewsData = (data || []) as DeliveryReview[];
       setReviews(reviewsData);
-      calculateStats(reviewsData);
+      calculateStats(reviewsData, fromDate, toDate);
     } catch (error) {
       console.error("Exception fetching reviews:", error);
       toast({
@@ -288,32 +292,58 @@ export function DeliveryUnderReview() {
     }
   };
 
-  const calculateStats = (allReviews: DeliveryReview[]) => {
-    const open = allReviews.filter((r) => r.review_status === "open" || r.review_status === "courier_followup").length;
-    const closed = allReviews.filter((r) => r.review_status === "completed").length;
-    const whatsappSent = allReviews.filter((r) => r.whatsapp_sent).length;
-    const reattempt = allReviews.filter((r) => r.courier_action === "reattempt_requested")
-      .length;
-    const delivered = allReviews.filter((r) => r.final_outcome === "delivered_after_followup")
-      .length;
-    const returned = allReviews.filter((r) => r.final_outcome === "returned_confirmed").length;
-    const fake = allReviews.filter((r) => r.final_outcome === "fake_attempt").length;
-    
-    // Count reattempt eligible orders (orders in delivery under review status that haven't had reattempt requested yet)
-    const openReviewsForStats = allReviews.filter((r) => r.review_status === "open" || r.review_status === "courier_followup");
-    const reattemptEligibleCount = openReviewsForStats.filter((r) => {
-      if (!r.raw_postex_response?.transactionStatusHistory) return false;
-      const history = r.raw_postex_response.transactionStatusHistory;
-      if (!Array.isArray(history) || history.length === 0) return false;
+  const calculateStats = (allReviews: DeliveryReview[], fromDate?: Date, toDate?: Date) => {
+    // Helper function to check if review is in delivery under review status (0008)
+    const isDeliveryUnderReviewStatus = (review: DeliveryReview): boolean => {
+      if (!review.raw_postex_response?.transactionStatusHistory) {
+        return false;
+      }
+      const history = review.raw_postex_response.transactionStatusHistory;
+      if (!Array.isArray(history) || history.length === 0) {
+        return false;
+      }
       const latestEntry = history[history.length - 1];
       return latestEntry?.transactionStatusMessageCode === "0008";
-    }).length;
+    };
+
+    // Count the three under review sections
+    // 1. Ready for reattempt: open status + 0008 status
+    const readyForReattempt = allReviews.filter((r) => r.review_status === "open" && isDeliveryUnderReviewStatus(r)).length;
+    
+    // 2. Reattempt requested: with reattempt_requested flag and within date range
+    let reattemptRequested = 0;
+    if (fromDate && toDate) {
+      reattemptRequested = allReviews.filter((r) => {
+        if (!r.reattempt_requested || r.review_status === "completed") {
+          return false;
+        }
+        if (!r.reattempt_requested_at) {
+          return false;
+        }
+        const reattemptDate = new Date(r.reattempt_requested_at);
+        return reattemptDate >= fromDate && reattemptDate <= toDate;
+      }).length;
+    } else {
+      reattemptRequested = allReviews.filter((r) => r.reattempt_requested && r.review_status !== "completed").length;
+    }
+    
+    // 3. Open reviews: open status + NOT 0008 + NOT reattempt_requested
+    const openReviewsCount = allReviews.filter((r) => r.review_status === "open" && !isDeliveryUnderReviewStatus(r) && !r.reattempt_requested).length;
+    
+    // Total under review = sum of the three sections
+    const totalUnderReview = readyForReattempt + reattemptRequested + openReviewsCount;
+    
+    const closed = allReviews.filter((r) => r.review_status === "completed").length;
+    const whatsappSent = allReviews.filter((r) => r.whatsapp_sent).length;
+    const delivered = allReviews.filter((r) => r.final_outcome === "delivered_after_followup").length;
+    const returned = allReviews.filter((r) => r.final_outcome === "returned_confirmed").length;
+    const fake = allReviews.filter((r) => r.final_outcome === "fake_attempt").length;
 
     setStats({
-      totalUnderReview: open,
+      totalUnderReview,
       closedCases: closed,
       whatsappSent,
-      reattemptRequested: reattempt,
+      reattemptRequested,
       deliveredAfterFollowup: delivered,
       returnedConfirmed: returned,
       fakeAttempts: fake,
@@ -420,7 +450,9 @@ export function DeliveryUnderReview() {
         setReattemptRemarks("Customer confirmed the order. Please arrange reattempt delivery as soon as possible.");
         setReattemptReview(null);
         // Recalculate stats with updated reviews
-        calculateStats(updatedReviews);
+        const fromDate = date?.from || startOfDay(new Date());
+        const toDate = date?.to || endOfDay(new Date());
+        calculateStats(updatedReviews, fromDate, toDate);
       } else {
         toast({
           title: "Error",
@@ -492,7 +524,9 @@ export function DeliveryUnderReview() {
           description: `Review updated successfully`,
         });
         // Recalculate stats with updated reviews
-        calculateStats(updatedReviews);
+        const fromDate = date?.from || startOfDay(new Date());
+        const toDate = date?.to || endOfDay(new Date());
+        calculateStats(updatedReviews, fromDate, toDate);
         setShowActionDialog(false);
       } else {
         toast({
@@ -541,7 +575,22 @@ export function DeliveryUnderReview() {
    };
 
     const reattemptEligibleReviews = filteredReviews.filter((r) => r.review_status === "open" && isDeliveryUnderReviewStatus(r));
-    const reattemptRequestedReviews = filteredReviews.filter((r) => r.reattempt_requested && r.review_status !== "completed");
+    const reattemptRequestedReviews = filteredReviews.filter((r) => {
+      if (!r.reattempt_requested || r.review_status === "completed") {
+        return false;
+      }
+      
+      // Check if reattempt_requested_at falls within the selected date range
+      if (!r.reattempt_requested_at) {
+        return false;
+      }
+      
+      const reattemptDate = new Date(r.reattempt_requested_at);
+      const fromDate = date?.from || startOfDay(new Date());
+      const toDate = date?.to || endOfDay(new Date());
+      
+      return reattemptDate >= fromDate && reattemptDate <= toDate;
+    });
     const openReviews = filteredReviews.filter((r) => r.review_status === "open" && !isDeliveryUnderReviewStatus(r) && !r.reattempt_requested);
     const completedReviews = filteredReviews.filter((r) => r.review_status === "completed");
 
@@ -842,6 +891,14 @@ export function DeliveryUnderReview() {
                         </Badge>
                         <span className="text-sm font-semibold text-slate-900">{review.review_reason_display}</span>
                       </div>
+                      {review.raw_postex_response && getPreviousAttemptsHistory(review.raw_postex_response).length > 0 && (
+                        <div className="flex items-center gap-1 text-xs text-slate-600 mt-2">
+                          <History className="h-3 w-3" />
+                          <span className="text-slate-500">
+                            Previous: {formatPreviousAttempts(getPreviousAttemptsHistory(review.raw_postex_response))}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex items-center gap-1 text-xs text-slate-600">
                         <span className="h-2 w-2 rounded-full bg-orange-500"></span>
                         Under Review
@@ -1524,6 +1581,14 @@ export function DeliveryUnderReview() {
                         </Badge>
                         <span className="text-sm font-semibold text-slate-900">{review.review_reason_display}</span>
                       </div>
+                      {review.raw_postex_response && getPreviousAttemptsHistory(review.raw_postex_response).length > 0 && (
+                        <div className="flex items-center gap-1 text-xs text-slate-600 mt-2">
+                          <History className="h-3 w-3" />
+                          <span className="text-slate-500">
+                            Previous: {formatPreviousAttempts(getPreviousAttemptsHistory(review.raw_postex_response))}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex items-center gap-1 text-xs text-slate-600">
                         <span className="h-2 w-2 rounded-full bg-orange-500"></span>
                         Under Review
