@@ -37,7 +37,7 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
     // Get all non-final status orders
     const { data: pendingOrders, error } = await supabase
       .from('orders')
-      .select('id, tracking_number, order_status, dispatch_date, customer_name, customer_phone, customer_address, customer_city, order_amount')
+      .select('id, tracking_number, order_status, dispatch_date, customer_name, customer_phone, customer_address')
       .not('order_status', 'in', `(${FINAL_STATUSES.join(',')})`);
     
     if (error) {
