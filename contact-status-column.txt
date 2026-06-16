@@ -1,0 +1,12 @@
+// Contact Status Column HTML to be added to each of the 3 grid sections
+// Add this AFTER the </div> closing tag for the Tracking Number column
+
+<div>
+  <p className="text-xs text-muted-foreground font-medium mb-1">Contact Status</p>
+  <div className="flex flex-wrap gap-2">
+    {review.customer_whatsapp_sent && <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">✓ Cust</span>}
+    {review.sales_whatsapp_sent && <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">✓ Sales</span>}
+    {review.postex_email_sent && <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">✉ Email</span>}
+    {!review.customer_whatsapp_sent && !review.sales_whatsapp_sent && !review.postex_email_sent && <span className="text-xs text-gray-400">-</span>}
+  </div>
+</div>

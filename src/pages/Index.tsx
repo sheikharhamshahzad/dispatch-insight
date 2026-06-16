@@ -6,7 +6,8 @@ import { Orders } from "@/components/Orders";
 import { AdCosts } from "@/components/AdCosts";
 import { Packaging } from "@/components/Packaging";
 import { BatchInventory } from "@/components/BatchInventory";
-import { BarChart3, Package, DollarSign, Box, Package2, Layers } from "lucide-react";
+import { DeliveryUnderReview } from "@/components/DeliveryUnderReview";
+import { BarChart3, Package, DollarSign, Box, Package2, Layers, AlertCircle } from "lucide-react";
 import { useTabNavigation } from "@/contexts/TabNavigationContext";
 
 const Index = () => {
@@ -23,8 +24,8 @@ const Index = () => {
         </div>
 
         <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)} className="space-y-6">
-          {/* Update grid-cols to 5 (was 6) */}
-          <TabsList className="hidden md:grid w-full grid-cols-5">
+          {/* Update grid-cols to 6 */}
+          <TabsList className="hidden md:grid w-full grid-cols-6">
             <TabsTrigger value="dashboard" className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4" />
               Dashboard
@@ -32,6 +33,10 @@ const Index = () => {
             <TabsTrigger value="orders" className="flex items-center gap-2">
               <Package className="h-4 w-4" />
               Orders
+            </TabsTrigger>
+            <TabsTrigger value="delivery-under-review" className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4" />
+              RTO Recovery
             </TabsTrigger>
             <TabsTrigger value="ad-costs" className="flex items-center gap-2">
               <DollarSign className="h-4 w-4" />
@@ -52,6 +57,9 @@ const Index = () => {
           </TabsContent>
           <TabsContent value="orders">
             <Orders />
+          </TabsContent>
+          <TabsContent value="delivery-under-review">
+            <DeliveryUnderReview />
           </TabsContent>
           <TabsContent value="ad-costs">
             <AdCosts />

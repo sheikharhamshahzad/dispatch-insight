@@ -7,6 +7,7 @@ import {
   DollarSign,
   Package2,
   Layers,
+  AlertCircle,
 } from "lucide-react";
 import { useTabNavigation, type TabKey } from "@/contexts/TabNavigationContext";
 
@@ -22,6 +23,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Ad Costs", tab: "ad-costs", icon: DollarSign },
   { label: "Packaging", tab: "packaging", icon: Package2 },
   { label: "Batch Inventory", tab: "batch-inventory", icon: Layers },
+  { label: "RTO Recovery", tab: "delivery-under-review", icon: AlertCircle },
 ];
 
 export default function MobileNav() {

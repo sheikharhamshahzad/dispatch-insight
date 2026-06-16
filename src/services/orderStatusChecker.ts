@@ -1,5 +1,15 @@
 import { supabase } from "@/integrations/supabase/client";
 import { fetchBulkOrderDetails, POSTEX_API_CONFIG } from "./postexApiService";
+import {
+  saveOrderStatusHistoryIfNew,
+  createDeliveryReviewsFromTrackingResponse,
+  completeDeliveryReviewsIfDelivered,
+  completeDeliveryReviewsIfReturned
+} from "./deliveryReviewService";
+import {
+  normalizePostexTrackingResponses,
+  NormalizedTrackingResponse
+} from "./deliveryReviewHelpers";
 
 // The final statuses that don't need further checking
 const FINAL_STATUSES = ['delivered', 'returned'];
@@ -27,7 +37,7 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
     // Get all non-final status orders
     const { data: pendingOrders, error } = await supabase
       .from('orders')
-      .select('tracking_number, order_status, dispatch_date')
+      .select('id, tracking_number, order_status, dispatch_date, customer_name, customer_phone, customer_address, customer_city, order_amount')
       .not('order_status', 'in', `(${FINAL_STATUSES.join(',')})`);
     
     if (error) {
@@ -82,15 +92,12 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
       // Create a map of tracking number -> order for quick lookup
       const orderMap = new Map(batch.map(o => [o.tracking_number, o]));
 
-      // Process each result
-      for (const item of response.dist) {
-        if (item.message !== 'SUCCESSFULLY RETRIEVE ORDER' || !item.trackingResponse) {
-          console.log(`[${tokenLabel}] Skipping ${item.trackingNumber}: ${item.message}`);
-          continue;
-        }
+      // Normalize the response to handle both bulk and single API response formats
+      const normalizedResponses = normalizePostexTrackingResponses(response);
 
-        const dist = item.trackingResponse;
-        const trackingNumber = item.trackingNumber;
+      // Process each result
+      for (const trackingResponse of normalizedResponses) {
+        const trackingNumber = trackingResponse.trackingNumber;
         const existingOrder = orderMap.get(trackingNumber);
         
         if (!existingOrder) {
@@ -98,19 +105,33 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
           continue;
         }
 
-        const newStatus = dist.transactionStatus.toLowerCase();
+        const newStatus = trackingResponse.transactionStatus?.toLowerCase() || 'unknown';
         
-        // Only update if status changed
+        // 1. Save order status history entry (even if status didn't change)
+        await saveOrderStatusHistoryIfNew(trackingNumber, existingOrder, trackingResponse);
+
+        // 2. Create delivery reviews if attempt reasons detected
+        const createdReviews = await createDeliveryReviewsFromTrackingResponse(
+          trackingNumber,
+          existingOrder,
+          trackingResponse
+        );
+
+        if (createdReviews.length > 0) {
+          console.log(`[${tokenLabel}] Created ${createdReviews.length} delivery reviews for ${trackingNumber}`);
+        }
+
+        // Only update order if status changed
         if (newStatus !== existingOrder.order_status) {
           // Calculate courier fee based on status (same logic as before)
           let courierFeeUpdate: number | undefined;
           
           if (newStatus === 'delivered') {
             // For delivered: transactionFee + transactionTax
-            courierFeeUpdate = (dist.transactionFee || 0) + (dist.transactionTax || 0);
+            courierFeeUpdate = (trackingResponse.transactionFee || 0) + (trackingResponse.transactionTax || 0);
           } else if (newStatus === 'returned') {
             // For returned: reversalFee + reversalTax
-            courierFeeUpdate = (dist.reversalFee || 0) + (dist.reversalTax || 0);
+            courierFeeUpdate = (trackingResponse.reversalFee || 0) + (trackingResponse.reversalTax || 0);
           }
 
           const updateObj: Record<string, any> = { order_status: newStatus };
@@ -131,6 +152,27 @@ export const checkAndUpdateOrderStatuses = async (): Promise<void> => {
               (courierFeeUpdate !== undefined ? ` (fee: ${courierFeeUpdate})` : '')
             );
             batchUpdates++;
+
+            // 3. Complete delivery reviews if order reached final status
+            if (newStatus === 'delivered') {
+              const completedDelivered = await completeDeliveryReviewsIfDelivered(
+                trackingNumber,
+                newStatus,
+                trackingResponse
+              );
+              if (completedDelivered > 0) {
+                console.log(`[${tokenLabel}] Completed ${completedDelivered} reviews - order delivered`);
+              }
+            } else if (newStatus === 'returned') {
+              const completedReturned = await completeDeliveryReviewsIfReturned(
+                trackingNumber,
+                newStatus,
+                trackingResponse
+              );
+              if (completedReturned > 0) {
+                console.log(`[${tokenLabel}] Completed ${completedReturned} reviews - order returned`);
+              }
+            }
           }
         }
       }

@@ -1,0 +1,17 @@
+node_modules
+dist
+build
+.next
+.vercel
+coverage
+.env
+.env.local
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+*.log
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.zip
