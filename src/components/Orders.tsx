@@ -1,5 +1,5 @@
 // Update your imports at the top of the file
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,7 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/components/ui/use-toast";
-import { Upload, Download, Trash2, Calendar as CalendarIcon, Pencil } from "lucide-react";
+import { Upload, Download, Trash2, Calendar as CalendarIcon, Pencil, FileText, X, Loader2, Layers, ChevronDown } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+import { expandProductTotals } from "@/lib/productExpansion";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -276,7 +278,9 @@ interface OrderInventoryAllocations {
 export function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
-  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfFiles, setPdfFiles] = useState<File[]>([]);
+  const [isDraggingPdf, setIsDraggingPdf] = useState(false);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [deleteTrackingNumber, setDeleteTrackingNumber] = useState<string | null>(null);
@@ -329,6 +333,14 @@ export function Orders() {
   // Add these new state variables at the top of your Orders component
   const [successCount, setSuccessCount] = useState<number>(0);
   const [failedCount, setFailedCount] = useState<number>(0);
+  const [skippedCount, setSkippedCount] = useState<number>(0);
+  const [totalToProcess, setTotalToProcess] = useState<number>(0);
+  // 1-based index of the PDF currently being read, 0 when not reading
+  const [readingFileIndex, setReadingFileIndex] = useState<number>(0);
+
+  // Product totals view: as dispatched, or expanded into individual products
+  const [isProductTotalsExpanded, setIsProductTotalsExpanded] = useState(false);
+  const [openExpandedProducts, setOpenExpandedProducts] = useState<Set<string>>(new Set());
 
   // NEW: Add these states for bulk selection
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set());
@@ -875,83 +887,145 @@ export function Orders() {
     }
   };
 
+  const isPdfFile = (file: File) =>
+    file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+
+  const pdfFileKey = (file: File) => `${file.name}-${file.size}-${file.lastModified}`;
+
+  const formatFileSize = (bytes: number) =>
+    bytes < 1024 * 1024
+      ? `${Math.max(1, Math.round(bytes / 1024))} KB`
+      : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+  // Add selected/dropped files to the upload list, ignoring non-PDFs and files already added
+  const addPdfFiles = (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+
+    const incoming = Array.from(fileList);
+    const pdfs = incoming.filter(isPdfFile);
+    const rejected = incoming.length - pdfs.length;
+
+    setPdfFiles(prev => {
+      const existingKeys = new Set(prev.map(pdfFileKey));
+      const newFiles = pdfs.filter(file => {
+        const key = pdfFileKey(file);
+        if (existingKeys.has(key)) return false;
+        existingKeys.add(key);
+        return true;
+      });
+      return [...prev, ...newFiles];
+    });
+
+    if (rejected > 0) {
+      toast({
+        title: "Some files were skipped",
+        description: `${rejected} file${rejected === 1 ? ' is' : 's are'} not a PDF and ${rejected === 1 ? 'was' : 'were'} not added.`,
+        variant: "destructive",
+      });
+    }
+  };
+
+  const removePdfFile = (file: File) => {
+    const key = pdfFileKey(file);
+    setPdfFiles(prev => prev.filter(f => pdfFileKey(f) !== key));
+  };
+
+  // Read a courier label PDF and return every tracking number found in it
+  const extractTrackingNumbersFromPdf = async (file: File): Promise<string[]> => {
+    const fileData = await file.arrayBuffer();
+
+    // Load the PDF document
+    const pdf = await pdfjs.getDocument({ data: fileData }).promise;
+    const numPages = pdf.numPages;
+    console.log(`PDF "${file.name}" loaded successfully with ${numPages} pages`);
+
+    const foundNumbers: string[] = [];
+
+    // Enhanced tracking number extraction
+    for (let i = 1; i <= numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map((item: any) => item.str).join(' ');
+
+      console.log(`Page ${i} text length: ${pageText.length} characters`);
+
+      // Try different regex patterns to extract tracking numbers
+      const patterns = [
+        /\b(\d{14})\b/g,                      // Basic 14-digit number
+        /tracking\s*(?:number|no|#)?[:\s]*(\d{14})/gi, // "tracking number: XXXXXX" format
+        /waybill\s*(?:number|no|#)?[:\s]*(\d{14})/gi,  // "waybill number: XXXXXX" format
+        /consignment\s*(?:number|no|#)?[:\s]*(\d{14})/gi // "consignment number: XXXXXX" format
+      ];
+
+      let pageCount = 0;
+      for (const pattern of patterns) {
+        const matches = [...pageText.matchAll(pattern)];
+        for (const match of matches) {
+          const trackingNumber = match[1];
+          if (trackingNumber && trackingNumber.length === 14) {
+            foundNumbers.push(trackingNumber);
+            pageCount++;
+          }
+        }
+      }
+
+      console.log(`Found ${pageCount} tracking numbers on page ${i}`);
+    }
+
+    return foundNumbers;
+  };
+
   // Update the handlePdfUpload function to correctly calculate courier fees
   const handlePdfUpload = async (pdfType: 'dispatch' | 'return') => {
-    if (!pdfFile) return;
-    
+    if (pdfFiles.length === 0) return;
+
+    const filesToProcess = pdfFiles;
+
     setIsProcessing(true);
     setProcessedCount(0);
     setSuccessCount(0);
     setFailedCount(0);
+    setSkippedCount(0);
+    setTotalToProcess(0);
 
     try {
-      const fileData = await pdfFile.arrayBuffer();
-      
-      // Try to debug PDF content first
-      console.log("PDF upload started, extracting content...");
-      
-      // Load the PDF document
-      const pdf = await pdfjs.getDocument({ data: fileData }).promise;
-      console.log(`PDF loaded successfully with ${pdf.numPages} pages`);
-      
-      // Extract and show the full text for debugging
-      let fullText = '';
-      for (let i = 1; i <= Math.min(pdf.numPages, 2); i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(' ');
-        fullText += pageText + '\n\n';
-      }
-      
-      // Log a sample of the text to help debug tracking number extraction
-      console.log(`PDF text sample (first 500 chars): ${fullText.substring(0, 500)}`);
-      
-      const numPages = pdf.numPages;
-      let extractedData = [];
+      console.log(`PDF upload started for ${filesToProcess.length} file(s), extracting content...`);
 
-      // Debug logging for PDF processing
-      console.log(`Processing PDF with ${numPages} pages`);
+      // Collect tracking numbers from every PDF. A file that can't be read is
+      // reported but doesn't stop the others from being processed.
+      const allTrackingNumbers: string[] = [];
+      const unreadableFiles: string[] = [];
 
-      // Enhanced tracking number extraction
-      for (let i = 1; i <= numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(' ');
-        
-        console.log(`Page ${i} text length: ${pageText.length} characters`);
-        
-        // Try different regex patterns to extract tracking numbers
-        const patterns = [
-          /\b(\d{14})\b/g,                      // Basic 14-digit number
-          /tracking\s*(?:number|no|#)?[:\s]*(\d{14})/gi, // "tracking number: XXXXXX" format
-          /waybill\s*(?:number|no|#)?[:\s]*(\d{14})/gi,  // "waybill number: XXXXXX" format
-          /consignment\s*(?:number|no|#)?[:\s]*(\d{14})/gi // "consignment number: XXXXXX" format
-        ];
-        
-        let foundNumbers = [];
-        
-        for (const pattern of patterns) {
-          const matches = [...pageText.matchAll(pattern)];
-          for (const match of matches) {
-            const trackingNumber = match[1];
-            if (trackingNumber && trackingNumber.length === 14) {
-              foundNumbers.push(trackingNumber);
-            }
-          }
+      for (let f = 0; f < filesToProcess.length; f++) {
+        const file = filesToProcess[f];
+        setReadingFileIndex(f + 1);
+        try {
+          allTrackingNumbers.push(...await extractTrackingNumbersFromPdf(file));
+        } catch (fileError: any) {
+          console.error(`Error reading PDF "${file.name}":`, fileError);
+          unreadableFiles.push(file.name);
         }
-        
-        console.log(`Found ${foundNumbers.length} tracking numbers on page ${i}`);
-        extractedData.push(...foundNumbers.map(num => ({ trackingNumber: num })));
+      }
+      setReadingFileIndex(0);
+
+      if (unreadableFiles.length === filesToProcess.length) {
+        throw new Error(
+          filesToProcess.length === 1
+            ? 'the file could not be read'
+            : 'none of the selected files could be read'
+        );
       }
 
-      // Deduplicate tracking numbers
-      const uniqueTrackingNumbers = Array.from(new Set(extractedData.map(data => data.trackingNumber)));
+      // Deduplicate tracking numbers (also across files)
+      const uniqueTrackingNumbers = Array.from(new Set(allTrackingNumbers));
       console.log(`Found ${uniqueTrackingNumbers.length} unique tracking numbers`);
-      
+      setTotalToProcess(uniqueTrackingNumbers.length);
+
       // Track successes and failures locally within this function
       let localSuccessCount = 0;
       let localFailedCount = 0;
-      
+      let localSkippedCount = 0;
+
       // Process each tracking number
       for (let i = 0; i < uniqueTrackingNumbers.length; i++) {
         const trackingNumber = uniqueTrackingNumbers[i];
@@ -966,8 +1040,8 @@ export function Orders() {
 
           if (existingOrders && existingOrders.length > 0) {
             console.log(`Order with tracking number ${trackingNumber} already exists. Skipping.`);
-            localFailedCount++;
-            setFailedCount(localFailedCount);
+            localSkippedCount++;
+            setSkippedCount(localSkippedCount);
             continue;
           }
           
@@ -1075,9 +1149,20 @@ export function Orders() {
       }
       
       // Now show the toast with the final counts
+      const readFileCount = filesToProcess.length - unreadableFiles.length;
+      const summaryParts = [
+        `${localSuccessCount} successful`,
+        ...(localSkippedCount > 0 ? [`${localSkippedCount} already existed`] : []),
+        `${localFailedCount} failed`,
+      ];
       toast({
         title: "Processing Complete",
-        description: `Processed ${uniqueTrackingNumbers.length} orders: ${localSuccessCount} successful, ${localFailedCount} failed`,
+        description:
+          `Processed ${uniqueTrackingNumbers.length} orders` +
+          (filesToProcess.length > 1 ? ` from ${readFileCount} PDF${readFileCount === 1 ? '' : 's'}` : '') +
+          `: ${summaryParts.join(', ')}` +
+          (unreadableFiles.length > 0 ? `. Could not read: ${unreadableFiles.join(', ')}` : ''),
+        variant: unreadableFiles.length > 0 ? "destructive" : "default",
       });
       
       // Refresh orders list
@@ -1092,8 +1177,23 @@ export function Orders() {
       });
     } finally {
       setIsProcessing(false);
-      setPdfFile(null);
+      setReadingFileIndex(0);
+      setPdfFiles([]);
     }
+  };
+
+  const expandedProductTotals = useMemo(
+    () => expandProductTotals(productTotals),
+    [productTotals]
+  );
+
+  const toggleExpandedProduct = (key: string) => {
+    setOpenExpandedProducts(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
 
   // Add the calculateProductTotals function
@@ -1689,39 +1789,187 @@ export function Orders() {
                 Upload Dispatch PDF
               </CardTitle>
               <CardDescription>
-                Upload PDF with courier labels to automatically process orders
+                Upload one or more PDFs with courier labels to automatically process orders
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <Input
+              <input
+                ref={pdfInputRef}
                 type="file"
-                accept=".pdf"
-                onChange={(e) => setPdfFile(e.target.files?.[0] || null)}
+                accept=".pdf,application/pdf"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  addPdfFiles(e.target.files);
+                  // Reset so selecting the same file again still triggers onChange
+                  e.target.value = '';
+                }}
               />
-              <Button 
-                onClick={() => handlePdfUpload('dispatch')} 
-                disabled={!pdfFile || isProcessing}
+              <div
+                role="button"
+                tabIndex={isProcessing ? -1 : 0}
+                aria-disabled={isProcessing}
+                onClick={() => !isProcessing && pdfInputRef.current?.click()}
+                onKeyDown={(e) => {
+                  if (!isProcessing && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault();
+                    pdfInputRef.current?.click();
+                  }
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  if (!isProcessing) setIsDraggingPdf(true);
+                }}
+                onDragLeave={() => setIsDraggingPdf(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDraggingPdf(false);
+                  if (!isProcessing) addPdfFiles(e.dataTransfer.files);
+                }}
+                className={cn(
+                  "flex cursor-pointer flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed p-4 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  isDraggingPdf
+                    ? "border-primary bg-primary/5"
+                    : "border-muted-foreground/25 hover:border-primary/50 hover:bg-muted/30",
+                  isProcessing && "pointer-events-none opacity-60"
+                )}
+              >
+                <FileText className="h-6 w-6 text-muted-foreground" />
+                <p className="text-sm font-medium">
+                  {pdfFiles.length > 0 ? 'Add more PDFs' : 'Drop PDFs here or click to browse'}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  You can select several files at once
+                </p>
+              </div>
+
+              {pdfFiles.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>
+                      {pdfFiles.length} PDF{pdfFiles.length === 1 ? '' : 's'} selected
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs"
+                      onClick={() => setPdfFiles([])}
+                      disabled={isProcessing}
+                    >
+                      Clear all
+                    </Button>
+                  </div>
+                  <ul className="max-h-36 space-y-1 overflow-auto pr-1">
+                    {pdfFiles.map((file, idx) => {
+                      const isReading = isProcessing && readingFileIndex === idx + 1;
+                      const isRead = isProcessing && (readingFileIndex === 0 || readingFileIndex > idx + 1);
+                      return (
+                        <li
+                          key={pdfFileKey(file)}
+                          className="flex items-center gap-2 rounded-md border bg-muted/30 px-2 py-1.5 text-sm"
+                        >
+                          <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0 flex-1 truncate" title={file.name}>
+                            {file.name}
+                          </span>
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {formatFileSize(file.size)}
+                          </span>
+                          {isReading ? (
+                            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" aria-label="Reading" />
+                          ) : isProcessing ? (
+                            <span className="w-4 shrink-0 text-center text-xs text-muted-foreground">
+                              {isRead ? '✓' : ''}
+                            </span>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 shrink-0"
+                              onClick={() => removePdfFile(file)}
+                              aria-label={`Remove ${file.name}`}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              {isProcessing && (
+                <div className="space-y-1.5">
+                  <Progress
+                    value={
+                      readingFileIndex > 0
+                        ? 0
+                        : totalToProcess > 0
+                          ? (processedCount / totalToProcess) * 100
+                          : 0
+                    }
+                    className="h-2"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {readingFileIndex > 0
+                      ? `Reading PDF ${readingFileIndex} of ${pdfFiles.length}…`
+                      : `Order ${processedCount} of ${totalToProcess} · ${successCount} added · ${skippedCount} already existed · ${failedCount} failed`}
+                  </p>
+                </div>
+              )}
+
+              <Button
+                onClick={() => handlePdfUpload('dispatch')}
+                disabled={pdfFiles.length === 0 || isProcessing}
                 className="w-full"
               >
-                {isProcessing
-                  ? `Processing... (${processedCount}/${successCount} success/${failedCount} failed)`
-                  : 'Process Dispatch PDF'}
+                {isProcessing ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Processing...
+                  </>
+                ) : pdfFiles.length > 1 ? (
+                  `Process ${pdfFiles.length} Dispatch PDFs`
+                ) : (
+                  'Process Dispatch PDF'
+                )}
               </Button>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect width="18" height="18" x="3" y="3" rx="2" />
-                  <path d="M3 9h18" />
-                  <path d="M9 21V9" />
-                </svg>
-                Product Totals
-              </CardTitle>
+              <div className="flex items-start justify-between gap-2">
+                <CardTitle className="flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect width="18" height="18" x="3" y="3" rx="2" />
+                    <path d="M3 9h18" />
+                    <path d="M9 21V9" />
+                  </svg>
+                  Product Totals
+                </CardTitle>
+                <Button
+                  variant={isProductTotalsExpanded ? "default" : "outline"}
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => setIsProductTotalsExpanded(prev => !prev)}
+                  disabled={Object.keys(productTotals).length === 0}
+                  aria-pressed={isProductTotalsExpanded}
+                  title={
+                    isProductTotalsExpanded
+                      ? 'Show products as dispatched'
+                      : 'Split bundles and replacements into individual products'
+                  }
+                >
+                  <Layers className="mr-1.5 h-4 w-4" />
+                  {isProductTotalsExpanded ? 'Collapse' : 'Expand'}
+                </Button>
+              </div>
               <CardDescription>
-                Summary of products dispatched in the current view
+                {isProductTotalsExpanded
+                  ? 'Total units of each product needed, with bundles and replacements split into individual items'
+                  : 'Summary of products dispatched in the current view'}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -1730,6 +1978,98 @@ export function Orders() {
                   <p className="text-sm text-muted-foreground">
                     No products found in current orders
                   </p>
+                ) : isProductTotalsExpanded ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-start">
+                    {expandedProductTotals.map((item) => {
+                      const isOpen = openExpandedProducts.has(item.key);
+                      const variantEntries = Object.entries(item.variants);
+                      const unspecifiedVariants =
+                        variantEntries.length > 0
+                          ? item.total - variantEntries.reduce((sum, [, n]) => sum + n, 0)
+                          : 0;
+                      const breakdown = [
+                        item.fromSingles > 0 && `${item.fromSingles} single`,
+                        item.fromBundles > 0 && `${item.fromBundles} in bundles`,
+                        item.fromReplacements > 0 &&
+                          `${item.fromReplacements} replacement${item.fromReplacements === 1 ? '' : 's'}`,
+                      ].filter(Boolean);
+
+                      return (
+                        <div
+                          key={item.key}
+                          className={cn(
+                            "p-2 border rounded-md",
+                            item.isBaseProduct ? "bg-muted/30" : "bg-muted/10 border-dashed"
+                          )}
+                        >
+                          <div className="flex justify-between items-center gap-2">
+                            <span
+                              className="text-sm font-medium break-words min-w-0"
+                              style={{ wordBreak: 'break-word' }}
+                              title={item.label}
+                            >
+                              {item.label}
+                            </span>
+                            <Badge variant="secondary" className="ml-auto shrink-0">
+                              {item.total} units
+                            </Badge>
+                          </div>
+
+                          {item.isBaseProduct && (item.fromBundles > 0 || item.fromReplacements > 0) && (
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {breakdown.join(' · ')}
+                            </p>
+                          )}
+
+                          {variantEntries.length > 0 && (
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              {variantEntries.map(([variant, units]) => (
+                                <Badge key={variant} variant="outline" className="px-1.5 py-0 text-[11px] font-normal">
+                                  {variant}: {units}
+                                </Badge>
+                              ))}
+                              {unspecifiedVariants > 0 && (
+                                <Badge variant="outline" className="px-1.5 py-0 text-[11px] font-normal text-muted-foreground">
+                                  Unspecified: {unspecifiedVariants}
+                                </Badge>
+                              )}
+                            </div>
+                          )}
+
+                          {item.isBaseProduct && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => toggleExpandedProduct(item.key)}
+                                className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                                aria-expanded={isOpen}
+                              >
+                                <ChevronDown
+                                  className={cn("h-3 w-3 transition-transform", isOpen && "rotate-180")}
+                                />
+                                {isOpen ? 'Hide' : 'Show'} sources ({item.sources.length})
+                              </button>
+                              {isOpen && (
+                                <ul className="mt-1.5 space-y-1 border-t pt-1.5 text-xs text-muted-foreground">
+                                  {item.sources.map((source) => (
+                                    <li key={source.name} className="flex justify-between gap-2">
+                                      <span className="break-words min-w-0" style={{ wordBreak: 'break-word' }}>
+                                        {source.name}
+                                        {source.kind !== 'single' && (
+                                          <span className="ml-1 italic">({source.kind})</span>
+                                        )}
+                                      </span>
+                                      <span className="shrink-0 tabular-nums">{source.units}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {Object.entries(productTotals).map(([name, data]) => (
@@ -1754,9 +2094,13 @@ export function Orders() {
               </div>
               
               <div className="mt-4 pt-4 border-t flex justify-between items-center">
-                <span className="text-sm font-semibold">Total Products:</span>
+                <span className="text-sm font-semibold">
+                  {isProductTotalsExpanded ? 'Total Items (bundles split):' : 'Total Products:'}
+                </span>
                 <Badge variant="outline" className="text-sm">
-                  {Object.values(productTotals).reduce((a, b) => a + b.total, 0)} units
+                  {isProductTotalsExpanded
+                    ? expandedProductTotals.reduce((a, b) => a + b.total, 0)
+                    : Object.values(productTotals).reduce((a, b) => a + b.total, 0)} units
                 </Badge>
               </div>
             </CardContent>
